@@ -1,0 +1,18 @@
+[Unit]
+Description=castd - Miracast + AirPlay meeting room receiver
+After=network.target dbus.service wpa_supplicant.service
+Wants=wpa_supplicant.service
+
+[Service]
+Type=notify
+ExecStart=/usr/bin/python3 -m castd.main
+Restart=always
+RestartSec=3
+WatchdogSec=30
+# No StandardInput=tty / TTYPath here: the retrospective's #5 lesson is that
+# a controlling-terminal-bound service and a framebuffer/DRM client fight
+# over VT ownership and get SIGTERM'd on hangup. This service opens no TTY.
+User=root
+
+[Install]
+WantedBy=multi-user.target
