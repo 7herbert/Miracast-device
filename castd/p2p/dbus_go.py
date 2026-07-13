@@ -130,6 +130,34 @@ class P2PGroupOwner:
         self.bus.add_signal_receiver(
             self._handle_wps_failed, dbus_interface=IFACE_P2PDEVICE, signal_name="WpsFailed"
         )
+        # Diagnostic-only: these were never subscribed to before, which
+        # meant a real Windows negotiation attempt produced literally zero
+        # log output regardless of what wpa_supplicant was actually doing
+        # -- easy to mistake for "nothing is happening" when it was really
+        # "we never asked to be told". Log every one generically so the
+        # next real-hardware test shows the actual P2P/WPS negotiation
+        # sequence instead of silence.
+        for signal_name in (
+            "DeviceFound",
+            "DeviceFoundProperties",
+            "DeviceLost",
+            "GONegotiationRequest",
+            "GONegotiationSuccess",
+            "GONegotiationFailure",
+            "ProvisionDiscoveryRequestDisplayPin",
+            "ProvisionDiscoveryResponseDisplayPin",
+            "ProvisionDiscoveryRequestEnterPin",
+            "ProvisionDiscoveryResponseEnterPin",
+            "ProvisionDiscoveryPBCRequest",
+            "ProvisionDiscoveryPBCResponse",
+            "ProvisionDiscoveryFailure",
+            "GroupFormationFailure",
+            "InvitationResult",
+            "GroupFinished",
+        ):
+            self.bus.add_signal_receiver(
+                self._make_signal_logger(signal_name), dbus_interface=IFACE_P2PDEVICE, signal_name=signal_name
+            )
 
     def configure(self) -> None:
         self.props_iface.Set(
@@ -243,6 +271,12 @@ class P2PGroupOwner:
                 signature="sv",
             )
         )
+
+    def _make_signal_logger(self, signal_name: str) -> Callable[..., None]:
+        def handler(*args: object) -> None:
+            logger.info("P2P signal %s: %s", signal_name, args)
+
+        return handler
 
     def _handle_group_started(self, properties: dict) -> None:
         group_object_path = properties["group_object"]
