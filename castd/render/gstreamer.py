@@ -6,11 +6,17 @@ DRM device node). Not runnable on this Windows dev box; verified here only
 by syntax check (py_compile) and by testing the pure pipeline-string builder
 functions, which have no GStreamer dependency at all.
 
-Why kmssink instead of the old VLC/X11 stack: it writes directly to
-/dev/dri/cardN, so there is no X server, no `su - pi` user switch, no
+Why kmssink instead of the old VLC/X11 stack: it writes directly to the
+DRM/KMS plane, so there is no X server, no `su - pi` user switch, no
 fighting over an X11 DISPLAY between the idle-screen player and the
 streaming player (project retrospective items #12-#14, #18). One process,
-one output, whichever protocol's session owns it at the time.
+one output, whichever protocol's session owns it at the time. Requires a
+desktop environment/display manager (lightdm, etc.) to NOT be running --
+real-hardware testing found kmssink cannot get DRM master while one owns
+the display, and separately found this GStreamer build's kmssink has no
+"device" property at all (a real bug in earlier code here): the actual
+properties are driver-name/bus-id/connector-id/plane-id, confirmed via
+`gst-inspect-1.0 kmssink` on the target hardware.
 """
 from __future__ import annotations
 
@@ -23,7 +29,7 @@ logger = logging.getLogger(__name__)
 
 @dataclass(frozen=True)
 class RenderTarget:
-    drm_device: str = "/dev/dri/card0"
+    driver_name: str = "vc4"  # the Raspberry Pi 4's DRM/KMS driver
     connector_id: int | None = None  # None = let kmssink auto-pick the connected output
 
 
@@ -38,7 +44,7 @@ def build_wfd_pipeline_description(*, udp_port: int, target: RenderTarget) -> st
         f"! rtpjitterbuffer latency=200 "
         f"! rtpmp2tdepay "
         f"! tsdemux name=demux "
-        f"demux. ! queue ! h264parse ! v4l2h264dec ! kmssink device={target.drm_device}{connector} sync=false "
+        f"demux. ! queue ! h264parse ! v4l2h264dec ! kmssink driver-name={target.driver_name}{connector} sync=false "
         f"demux. ! queue ! aacparse ! avdec_aac ! audioconvert ! alsasink"
     )
 
@@ -51,7 +57,7 @@ def build_idle_screen_pipeline(*, png_path: str, target: RenderTarget) -> str:
     return (
         f"filesrc location={png_path} "
         f"! decodebin ! imagefreeze "
-        f"! kmssink device={target.drm_device}{connector} sync=false"
+        f"! kmssink driver-name={target.driver_name}{connector} sync=false"
     )
 
 
@@ -72,7 +78,15 @@ class RenderProcess:
             raise RuntimeError("a render pipeline is already running; stop() it first")
         argv = ["gst-launch-1.0", "-e"] + pipeline_description.split()
         logger.info("starting render pipeline: %s", pipeline_description)
-        self._proc = subprocess.Popen(argv, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+        # stderr=subprocess.PIPE with nothing ever reading it was a real bug:
+        # gst-launch-1.0 failing immediately (e.g. the "no property 'device'
+        # in element kmssink" pipeline error found on real hardware) produced
+        # a defunct/zombie process with its error text sitting unread in the
+        # pipe -- invisible in journalctl, making a real, fatal pipeline
+        # error look like silent, inexplicable failure. Let stderr inherit
+        # from this process (itself running under systemd) so it lands in
+        # the journal automatically.
+        self._proc = subprocess.Popen(argv, stdout=subprocess.DEVNULL)
 
     def stop(self, *, timeout: float = 3.0) -> None:
         if self._proc is None:
