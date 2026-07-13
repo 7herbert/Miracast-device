@@ -173,6 +173,17 @@ class P2PGroupOwner:
             self.bus.add_signal_receiver(
                 self._make_signal_logger(signal_name), dbus_interface=IFACE_P2PDEVICE, signal_name=signal_name
             )
+        # WPS.Event/Credentials are on a DIFFERENT interface (IFACE_WPS, not
+        # IFACE_P2PDEVICE) and were never subscribed to either -- this is
+        # exactly where the actual M1-M8 WPS message exchange progress
+        # (or failure) after a peer submits a PIN would show up. Without
+        # these, a real negotiation attempt going quiet after
+        # ProvisionDiscoveryRequestDisplayPin is indistinguishable from
+        # "the peer never tried" vs "the peer tried and failed inside WPS".
+        for signal_name in ("Event", "Credentials", "PropertiesChanged"):
+            self.bus.add_signal_receiver(
+                self._make_signal_logger(f"WPS.{signal_name}"), dbus_interface=IFACE_WPS, signal_name=signal_name
+            )
 
     def configure(self) -> None:
         self.props_iface.Set(
