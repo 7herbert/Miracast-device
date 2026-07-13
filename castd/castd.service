@@ -2,6 +2,17 @@
 Description=castd - Miracast + AirPlay meeting room receiver
 After=network.target dbus.service wpa_supplicant.service
 Wants=wpa_supplicant.service
+# Real-hardware testing found that a short RestartSec hammering
+# p2p_group_add failures in a tight loop can wedge the rtw89 USB Wi-Fi
+# adapter's driver state until every subsequent attempt fails with
+# "Device or resource busy" -- even a clean wpa_supplicant restart doesn't
+# recover it while the hammering continues. StartLimit stops the retries
+# outright after 5 failures in 5 minutes (unit goes to "failed"; a human
+# runs `systemctl reset-failed castd && systemctl start castd` once the
+# underlying cause -- config, driver, whatever -- is fixed) instead of
+# retrying forever and making the hardware state worse.
+StartLimitIntervalSec=300
+StartLimitBurst=5
 
 [Service]
 Type=notify
@@ -18,7 +29,9 @@ Environment="PYTHONPATH=/home/pi/Miracast-device"
 ExecStartPre=-/sbin/ip link set wlan1 up
 ExecStart=/usr/bin/python3 -m castd.main
 Restart=always
-RestartSec=3
+# 15s, not the original 3s: gives the P2P group interface time to fully
+# tear down between attempts instead of retrying into a busy driver.
+RestartSec=15
 WatchdogSec=30
 # No StandardInput=tty / TTYPath here: the retrospective's #5 lesson is that
 # a controlling-terminal-bound service and a framebuffer/DRM client fight
