@@ -95,7 +95,21 @@ class CastDaemon:
 
         self.uxplay.start()
 
-        self.p2p.run_forever()
+        # Real-hardware testing found run_forever() was called a SECOND
+        # time here (on the main thread, after already starting it above
+        # on dbus_thread) -- two GLib main loops pumping the same default
+        # main context from different OS threads simultaneously. Synchronous
+        # D-Bus calls (GroupAdd, property Set/Get) still worked because
+        # they don't depend on main-loop-driven dispatch, which is why
+        # every fix up to this point tested fine; but asynchronous P2P
+        # signals arriving from an incoming peer's WPS negotiation
+        # (GONegotiationRequest, ProvisionDiscoveryRequestEnterPin,
+        # WpsFailed, etc.) were going through the contended/undefined-
+        # behavior dual main loop and never reliably reaching our signal
+        # handlers -- matching the symptom of Windows showing "connecting"
+        # while castd's log showed zero new activity. Join the thread
+        # instead of running a second main loop on this one.
+        dbus_thread.join()
 
     def _on_group_started(self, info: GroupInfo) -> None:
         logger.info("group started on %s @ %d MHz", info.interface_name, info.frequency_mhz)
