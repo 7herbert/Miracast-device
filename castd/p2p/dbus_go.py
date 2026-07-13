@@ -320,10 +320,17 @@ class P2PGroupOwner:
             interface_name=self.interface_name,
             frequency_mhz=self.freq_mhz,
         )
-        try:
-            self.set_wps_pin()
-        except dbus.DBusException:
-            logger.exception("failed to set fixed WPS PIN on new group")
+        # Real-hardware testing found calling set_wps_pin() here -- WPS.Start
+        # with a fixed Pin= -- actively BREAKS the display-PIN flow rather
+        # than being merely useless: it registers self.wps_pin as the only
+        # value the WPS registrar will accept, while wpa_supplicant
+        # separately auto-generates and validates its OWN fresh PIN per
+        # ProvisionDiscoveryRequestDisplayPin request. The two conflict, so
+        # even a peer that correctly enters the displayed (live, correct)
+        # PIN fails to authenticate. config_methods=display alone (set via
+        # the config file at CreateInterface time) is sufficient for
+        # wpa_supplicant to manage this on its own; do not call
+        # set_wps_pin() here.
         self._on_group_started(info)
 
     def _handle_wps_failed(self, status, *rest) -> None:
