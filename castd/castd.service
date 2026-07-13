@@ -5,6 +5,17 @@ Wants=wpa_supplicant.service
 
 [Service]
 Type=notify
+# Assumes the repo is cloned to /home/pi/Miracast-device; adjust both lines
+# if deployed elsewhere. Needed because `python3 -m castd.main` only finds
+# the castd package if it's on PYTHONPATH / the cwd contains it.
+WorkingDirectory=/home/pi/Miracast-device
+Environment="PYTHONPATH=/home/pi/Miracast-device"
+# `-` prefix: ExecStartPre failure must not fail the whole unit (retrospective
+# lesson #2). wlan1 defaults to DOWN after boot on Bookworm since nothing
+# else on the system brings up a USB Wi-Fi adapter that's unmanaged by
+# NetworkManager/dhcpcd; bring it up ourselves rather than depend on a
+# manual `ip link set wlan1 up` after every reboot.
+ExecStartPre=-/sbin/ip link set wlan1 up
 ExecStart=/usr/bin/python3 -m castd.main
 Restart=always
 RestartSec=3
