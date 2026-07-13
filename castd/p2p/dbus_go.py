@@ -67,9 +67,18 @@ class GroupInfo:
 
 class P2PGroupOwner:
     """Owns the D-Bus connection to wpa_supplicant for one wireless
-    interface and drives P2P Group Owner creation with a fixed WFD IE and a
-    fixed WPS PIN (config_methods=display so the Pi shows the PIN and
-    Windows types it in, rather than the reverse)."""
+    interface and drives P2P Group Owner creation with a WFD IE and
+    config_methods=display.
+
+    Real-hardware testing found there is no such thing as a usable *fixed*
+    WPS PIN for this flow: config_methods=display tells peers "ask this
+    device to display a PIN", and wpa_supplicant generates a brand new
+    random PIN for every single ProvisionDiscoveryRequestDisplayPin,
+    regardless of the Pin= value this class's WPS.Start call sets up at
+    group-start time (that call still runs, and still succeeds, but does
+    not control this). The only way to actually complete pairing is to
+    show the caller (via on_display_pin_needed) whatever PIN wpa_supplicant
+    just generated, live, so a human can read and type it in."""
 
     def __init__(
         self,
@@ -80,6 +89,7 @@ class P2PGroupOwner:
         wps_pin: str,
         on_group_started: Callable[[GroupInfo], None],
         on_wps_failed: Callable[[str], None],
+        on_display_pin_needed: Callable[[str], None],
         wpa_conf_path: str = DEFAULT_WPA_CONF_PATH,
     ) -> None:
         self.interface_name = interface_name
@@ -89,6 +99,7 @@ class P2PGroupOwner:
         self.wpa_conf_path = wpa_conf_path
         self._on_group_started = on_group_started
         self._on_wps_failed = on_wps_failed
+        self._on_display_pin_needed = on_display_pin_needed
 
         DBusGMainLoop(set_as_default=True)
         self.bus = dbus.SystemBus()
@@ -130,6 +141,11 @@ class P2PGroupOwner:
         self.bus.add_signal_receiver(
             self._handle_wps_failed, dbus_interface=IFACE_P2PDEVICE, signal_name="WpsFailed"
         )
+        self.bus.add_signal_receiver(
+            self._handle_display_pin_request,
+            dbus_interface=IFACE_P2PDEVICE,
+            signal_name="ProvisionDiscoveryRequestDisplayPin",
+        )
         # Diagnostic-only: these were never subscribed to before, which
         # meant a real Windows negotiation attempt produced literally zero
         # log output regardless of what wpa_supplicant was actually doing
@@ -144,7 +160,6 @@ class P2PGroupOwner:
             "GONegotiationRequest",
             "GONegotiationSuccess",
             "GONegotiationFailure",
-            "ProvisionDiscoveryRequestDisplayPin",
             "ProvisionDiscoveryResponseDisplayPin",
             "ProvisionDiscoveryRequestEnterPin",
             "ProvisionDiscoveryResponseEnterPin",
@@ -277,6 +292,14 @@ class P2PGroupOwner:
             logger.info("P2P signal %s: %s", signal_name, args)
 
         return handler
+
+    def _handle_display_pin_request(self, peer_object: str, pin: str) -> None:
+        # This IS the actual PIN a human must type into the connecting
+        # device -- see the class docstring. It is generated fresh by
+        # wpa_supplicant for this specific negotiation attempt and is
+        # unrelated to self.wps_pin.
+        logger.info("WPS display PIN requested by %s: %s", peer_object, pin)
+        self._on_display_pin_needed(str(pin))
 
     def _handle_group_started(self, properties: dict) -> None:
         group_object_path = properties["group_object"]

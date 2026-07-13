@@ -44,6 +44,10 @@ class FakeUxPlayProcess:
 def make_daemon(monkeypatch) -> main_module.CastDaemon:
     config = RoomConfig(room_name="MR-TEST", wps_pin="12345670", passphrase="abcdefghij", channel=36)
     monkeypatch.setattr(main_module, "UxPlayProcess", FakeUxPlayProcess)
+    # render_idle_screen writes a real PNG to disk (IDLE_PNG_PATH); fake it
+    # out here so _apply_actions(SHOW_IDLE_SCREEN) doesn't touch the
+    # filesystem during these wiring tests, same as render/uxplay/negotiate.
+    monkeypatch.setattr(main_module, "render_idle_screen", lambda *a, **k: None)
     daemon = main_module.CastDaemon(config)
     daemon.render = FakeRenderProcess()
     daemon.uxplay = FakeUxPlayProcess()

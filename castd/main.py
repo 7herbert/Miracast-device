@@ -37,6 +37,7 @@ from castd.fsm.state_machine import Action, CastArbiter, Event
 from castd.health import HealthState, serve_forever
 from castd.p2p.dbus_go import GroupInfo, P2PGroupOwner
 from castd.render.gstreamer import RenderProcess, RenderTarget, build_idle_screen_pipeline, build_wfd_pipeline_description
+from castd.render.idle_screen import render_idle_screen
 from castd import sdnotify
 from castd.wfdsink.rtsp import NegotiationError, WfdCapabilities
 from castd.wfdsink.session import negotiate, open_control_connection
@@ -64,7 +65,7 @@ class CastDaemon:
 
     def start(self) -> None:
         serve_forever(self.health)
-        self.render.start(build_idle_screen_pipeline(png_path=IDLE_PNG_PATH, target=self.render_target))
+        self._show_idle_screen()
         sdnotify.notify(ready=True, status="idle")
         threading.Thread(target=self._watchdog_heartbeat_loop, daemon=True).start()
 
@@ -75,6 +76,7 @@ class CastDaemon:
             wps_pin=self.config.wps_pin,
             on_group_started=self._on_group_started,
             on_wps_failed=self._on_wps_failed,
+            on_display_pin_needed=self._on_display_pin_needed,
         )
         self.p2p.configure()
         self.p2p.start_group()
@@ -117,6 +119,23 @@ class CastDaemon:
 
     def _on_wps_failed(self, status: str) -> None:
         logger.warning("WPS failed: %s", status)
+
+    def _show_idle_screen(self, pin: str | None = None) -> None:
+        # Real-hardware testing found the WPS "display PIN" wpa_supplicant
+        # generates is different on every negotiation attempt (see
+        # p2p/dbus_go.py's module docstring) -- there is no fixed PIN to
+        # bake into a static image once at startup. This regenerates the
+        # PNG and restarts the render pipeline every time a peer requests
+        # one, so whatever is on screen is always the PIN that will
+        # actually work right now.
+        render_idle_screen(IDLE_PNG_PATH, room_name=self.config.room_name, pin=pin)
+        if self.render.is_running:
+            self.render.stop()
+        self.render.start(build_idle_screen_pipeline(png_path=IDLE_PNG_PATH, target=self.render_target))
+
+    def _on_display_pin_needed(self, pin: str) -> None:
+        logger.info("displaying live WPS PIN on kiosk screen: %s", pin)
+        self._show_idle_screen(pin=pin)
 
     def _watchdog_heartbeat_loop(self, interval_s: float = 10.0) -> None:
         # WatchdogSec=30 in castd.service; ping at 1/3 that interval so a
@@ -163,7 +182,7 @@ class CastDaemon:
             if action is Action.STOP_RENDER_PIPELINE:
                 self.render.stop()
             elif action is Action.SHOW_IDLE_SCREEN:
-                self.render.start(build_idle_screen_pipeline(png_path=IDLE_PNG_PATH, target=self.render_target))
+                self._show_idle_screen()
             elif action is Action.PAUSE_AIRPLAY_ADVERTISING:
                 self.uxplay.stop()
             elif action is Action.RESUME_AIRPLAY_ADVERTISING:
