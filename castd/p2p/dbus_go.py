@@ -134,6 +134,32 @@ class P2PGroupOwner:
         self.props_iface.Set(
             IFACE_P2PDEVICE, "P2PDeviceConfig", dbus.Dictionary({"DeviceName": self.device_name}, signature="sv")
         )
+        # WSC Primary Device Type: category=7 (Displays), OUI=00:50:F2:00,
+        # sub-category=0. Real-hardware testing found the WFD subelems were
+        # being broadcast correctly (confirmed via a second wpa_supplicant
+        # instance's `wpa_cli p2p_peer` output) but Windows' Connect app
+        # still would not list the device -- with PrimaryDeviceType unset,
+        # `p2p_peer` reported "pri_dev_type=0-00000000-0" (category 0,
+        # uncategorized/generic-computer). Windows' Miracast picker very
+        # likely filters candidates by this WSC category to exclude other
+        # P2P devices (printers, phones) that also advertise WFD-unrelated
+        # P2P capability, so an unset category silently drops us from the
+        # list even with correct WFD subelems. Byte values match the
+        # PrimaryDeviceType this project's predecessor (lazycast's
+        # newmice.py) set successfully.
+        self.props_iface.Set(
+            IFACE_P2PDEVICE,
+            "P2PDeviceConfig",
+            dbus.Dictionary(
+                {
+                    "PrimaryDeviceType": dbus.Array(
+                        [dbus.Byte(b) for b in (0x00, 0x07, 0x00, 0x50, 0xF2, 0x00, 0x00, 0x00)],
+                        signature=dbus.Signature("y"),
+                    )
+                },
+                signature="sv",
+            ),
+        )
         # config_methods=display (fixed-PIN mode, not the SHOW-PIN flow) is
         # set via wpa_conf_path's config_methods= line, loaded when
         # CreateInterface runs in __init__ -- NOT set here as a
