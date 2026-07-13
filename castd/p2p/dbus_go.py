@@ -42,6 +42,7 @@ WPAS_SERVICE = "fi.w1.wpa_supplicant1"
 WPAS_OPATH = "/fi/w1/wpa_supplicant1"
 IFACE_INTERFACE = WPAS_SERVICE + ".Interface"
 IFACE_P2PDEVICE = IFACE_INTERFACE + ".P2PDevice"
+IFACE_WPS = IFACE_INTERFACE + ".WPS"
 
 # Raspberry Pi OS (Bookworm) starts wpa_supplicant.service in control-only
 # mode (ExecStart has no -i, just -u -s -O DIR=/run/wpa_supplicant): it owns
@@ -224,9 +225,28 @@ class P2PGroupOwner:
             raise RuntimeError(f"GroupAdd failed on {self.interface_name}: {exc}") from exc
 
     def set_wps_pin(self, group_object_path: str) -> None:
-        group_obj = self.bus.get_object(WPAS_SERVICE, group_object_path)
-        group_iface = dbus.Interface(group_obj, WPAS_SERVICE + ".Group")
-        group_iface.WpsPin("any", self.wps_pin)
+        # group_object_path (from the GroupStarted signal) points at the
+        # Group metadata object (.../Groups/XX, implementing
+        # fi.w1.wpa_supplicant1.Group -- read-only SSID/role/members
+        # properties, no WPS methods; this is what made the previous
+        # "Group.WpsPin" call fail with UnknownMethod, confirmed via full
+        # Introspect() on real hardware). WPS.Start must be called on the
+        # group's own *interface* object instead, obtained via the
+        # P2PDevice "Group" property -- not the signal argument, and not
+        # the same path.
+        group_iface_path = self.props_iface.Get(IFACE_P2PDEVICE, "Group")
+        group_iface_obj = self.bus.get_object(WPAS_SERVICE, group_iface_path)
+        wps_iface = dbus.Interface(group_iface_obj, IFACE_WPS)
+        wps_iface.Start(
+            dbus.Dictionary(
+                {
+                    "Role": dbus.String("registrar"),
+                    "Type": dbus.String("pin"),
+                    "Pin": dbus.String(self.wps_pin),
+                },
+                signature="sv",
+            )
+        )
 
     def _handle_group_started(self, properties: dict) -> None:
         group_object_path = properties["group_object"]
