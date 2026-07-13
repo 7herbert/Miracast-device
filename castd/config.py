@@ -22,6 +22,33 @@ class ConfigError(ValueError):
     pass
 
 
+def wps_pin_checksum(seven_digits: int) -> int:
+    """WSC (Wi-Fi Simple Config) device password checksum digit for a
+    7-digit PIN prefix. Real-hardware testing found an 8-digit WPS PIN
+    with an invalid checksum digit (31415926 -- chosen for its pi digits,
+    not spec compliance) gets silently rejected somewhere in the
+    wpa_supplicant/Windows WPS exchange: the D-Bus calls to arm it all
+    succeed without error, but the peer never completes pairing. Any
+    fixed keypad-mode WPS PIN must satisfy this checksum or the failure
+    mode is exactly this silent, hard-to-diagnose hang."""
+    accum = 0
+    accum += 3 * ((seven_digits // 1000000) % 10)
+    accum += 1 * ((seven_digits // 100000) % 10)
+    accum += 3 * ((seven_digits // 10000) % 10)
+    accum += 1 * ((seven_digits // 1000) % 10)
+    accum += 3 * ((seven_digits // 100) % 10)
+    accum += 1 * ((seven_digits // 10) % 10)
+    accum += 3 * (seven_digits % 10)
+    return (10 - accum % 10) % 10
+
+
+def is_valid_wps_pin(pin: str) -> bool:
+    if not _PIN_RE.match(pin):
+        return False
+    prefix, checksum_digit = int(pin[:7]), int(pin[7])
+    return wps_pin_checksum(prefix) == checksum_digit
+
+
 @dataclass(frozen=True)
 class RoomConfig:
     room_name: str
@@ -67,6 +94,14 @@ def parse_room_config(text: str) -> RoomConfig:
     wps_pin = values["wps_pin"]
     if not _PIN_RE.match(wps_pin):
         raise ConfigError(f"wps_pin must be exactly 8 digits, got {wps_pin!r}")
+    if not is_valid_wps_pin(wps_pin):
+        correct_checksum = wps_pin_checksum(int(wps_pin[:7]))
+        raise ConfigError(
+            f"wps_pin {wps_pin!r} fails the WSC checksum digit (last digit must be "
+            f"{correct_checksum}, i.e. {wps_pin[:7]}{correct_checksum}) -- an invalid "
+            "checksum is silently rejected during WPS pairing instead of raising a "
+            "clear error, so this is checked here instead"
+        )
 
     passphrase = values["passphrase"]
     if not (8 <= len(passphrase) <= 63):
