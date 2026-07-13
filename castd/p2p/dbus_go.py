@@ -42,6 +42,19 @@ WPAS_OPATH = "/fi/w1/wpa_supplicant1"
 IFACE_INTERFACE = WPAS_SERVICE + ".Interface"
 IFACE_P2PDEVICE = IFACE_INTERFACE + ".P2PDevice"
 
+# Raspberry Pi OS (Bookworm) starts wpa_supplicant.service in control-only
+# mode (ExecStart has no -i, just -u -s -O DIR=/run/wpa_supplicant): it owns
+# the fi.w1.wpa_supplicant1 D-Bus name but knows about zero interfaces at
+# boot. Only one process may ever hold that D-Bus name, so starting a
+# second `wpa_supplicant -i wlan1 ...` process (as earlier debugging tried)
+# just fails to register and does nothing. The correct way to attach wlan1
+# is to ask the *existing* process to create it, via D-Bus CreateInterface
+# -- see __init__ below. This config file supplies config_methods=display
+# (fixed-PIN mode) at interface-creation time instead of trying to patch it
+# in afterwards through a P2PDeviceConfig property whose key name/type this
+# project has not been able to confirm against a real wpa_supplicant build.
+DEFAULT_WPA_CONF_PATH = "/etc/wpa_supplicant/wpa_p2p.conf"
+
 
 @dataclass
 class GroupInfo:
@@ -65,11 +78,13 @@ class P2PGroupOwner:
         wps_pin: str,
         on_group_started: Callable[[GroupInfo], None],
         on_wps_failed: Callable[[str], None],
+        wpa_conf_path: str = DEFAULT_WPA_CONF_PATH,
     ) -> None:
         self.interface_name = interface_name
         self.device_name = device_name
         self.freq_mhz = freq_mhz
         self.wps_pin = wps_pin
+        self.wpa_conf_path = wpa_conf_path
         self._on_group_started = on_group_started
         self._on_wps_failed = on_wps_failed
 
@@ -80,11 +95,28 @@ class P2PGroupOwner:
 
         try:
             self.iface_path = self.wpas.GetInterface(self.interface_name)
-        except dbus.DBusException as exc:
-            raise RuntimeError(
-                f"wpa_supplicant does not know about interface {self.interface_name!r} "
-                "(is it up and passed to wpa_supplicant -i?)"
-            ) from exc
+        except dbus.DBusException:
+            logger.info(
+                "wpa_supplicant does not know about %s yet; creating it via D-Bus "
+                "(this is normal on Raspberry Pi OS Bookworm's control-only "
+                "wpa_supplicant.service)",
+                self.interface_name,
+            )
+            create_args = dbus.Dictionary(
+                {
+                    "Ifname": dbus.String(self.interface_name),
+                    "Driver": dbus.String("nl80211"),
+                    "ConfigFile": dbus.String(self.wpa_conf_path),
+                },
+                signature="sv",
+            )
+            try:
+                self.iface_path = self.wpas.CreateInterface(create_args)
+            except dbus.DBusException as exc:
+                raise RuntimeError(
+                    f"could not create wpa_supplicant interface for {self.interface_name!r} "
+                    f"(config file {self.wpa_conf_path!r}): {exc}"
+                ) from exc
 
         self.iface_obj = self.bus.get_object(WPAS_SERVICE, self.iface_path)
         self.p2p_iface = dbus.Interface(self.iface_obj, IFACE_P2PDEVICE)
@@ -101,15 +133,15 @@ class P2PGroupOwner:
         self.props_iface.Set(
             IFACE_P2PDEVICE, "P2PDeviceConfig", dbus.Dictionary({"DeviceName": self.device_name}, signature="sv")
         )
-        # config_methods bit for "display": the sink displays a PIN, the
-        # peer (Windows) is prompted to type it in. This is the fix for the
-        # open issue where Windows was instead driving a dynamically
-        # generated SHOW-PIN flow.
-        self.props_iface.Set(
-            IFACE_P2PDEVICE,
-            "P2PDeviceConfig",
-            dbus.Dictionary({"ConfigMethods": dbus.String("display")}, signature="sv"),
-        )
+        # config_methods=display (fixed-PIN mode, not the SHOW-PIN flow) is
+        # set via wpa_conf_path's config_methods= line, loaded when
+        # CreateInterface runs in __init__ -- NOT set here as a
+        # P2PDeviceConfig property. An earlier attempt to Set it as
+        # {"ConfigMethods": ...} on this property raised
+        # org.freedesktop.DBus.Error.InvalidArgs ("invalid message format"),
+        # and this project has not confirmed the correct key
+        # name/type against a real wpa_supplicant build, so it is not
+        # attempted here.
 
         wfd_bytes = build_wfd_ies()
         wfd_dbus_array = dbus.Array(
@@ -120,8 +152,17 @@ class P2PGroupOwner:
         )
 
     def start_group(self) -> None:
+        # Every value must be an explicit dbus type (not a bare Python bool
+        # or int) for the a{sv} signature to marshal correctly -- passing
+        # a plain `False`/int here is what previously raised
+        # fi.w1.wpa_supplicant1.InvalidArgs: "Did not receive correct
+        # message arguments."
+        groupadd_args = dbus.Dictionary(
+            {"persistent": dbus.Boolean(False), "frequency": dbus.Int32(self.freq_mhz)},
+            signature="sv",
+        )
         try:
-            self.p2p_iface.GroupAdd({"persistent": False, "frequency": dbus.Int32(self.freq_mhz)})
+            self.p2p_iface.GroupAdd(groupadd_args)
         except dbus.DBusException as exc:
             raise RuntimeError(f"GroupAdd failed on {self.interface_name}: {exc}") from exc
 
