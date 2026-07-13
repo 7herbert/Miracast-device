@@ -224,19 +224,15 @@ class P2PGroupOwner:
         except dbus.DBusException as exc:
             raise RuntimeError(f"GroupAdd failed on {self.interface_name}: {exc}") from exc
 
-    def set_wps_pin(self, group_object_path: str) -> None:
-        # group_object_path (from the GroupStarted signal) points at the
-        # Group metadata object (.../Groups/XX, implementing
-        # fi.w1.wpa_supplicant1.Group -- read-only SSID/role/members
-        # properties, no WPS methods; this is what made the previous
-        # "Group.WpsPin" call fail with UnknownMethod, confirmed via full
-        # Introspect() on real hardware). WPS.Start must be called on the
-        # group's own *interface* object instead, obtained via the
-        # P2PDevice "Group" property -- not the signal argument, and not
-        # the same path.
-        group_iface_path = self.props_iface.Get(IFACE_P2PDEVICE, "Group")
-        group_iface_obj = self.bus.get_object(WPAS_SERVICE, group_iface_path)
-        wps_iface = dbus.Interface(group_iface_obj, IFACE_WPS)
+    def set_wps_pin(self) -> None:
+        # Real-hardware testing found neither the Group metadata object
+        # (.../Groups/XX, from the GroupStarted signal) nor the interface
+        # object reachable via P2PDevice's "Group" property implement the
+        # WPS interface -- only wlan1's own top-level interface object
+        # does (confirmed via full Introspect(): P2PDevice and WPS are
+        # both implemented on that SAME object, not on any
+        # group-specific object). Call Start on self.iface_obj directly.
+        wps_iface = dbus.Interface(self.iface_obj, IFACE_WPS)
         wps_iface.Start(
             dbus.Dictionary(
                 {
@@ -257,7 +253,7 @@ class P2PGroupOwner:
             frequency_mhz=self.freq_mhz,
         )
         try:
-            self.set_wps_pin(group_object_path)
+            self.set_wps_pin()
         except dbus.DBusException:
             logger.exception("failed to set fixed WPS PIN on new group")
         self._on_group_started(info)
