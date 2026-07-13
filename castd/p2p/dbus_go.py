@@ -167,6 +167,16 @@ class P2PGroupOwner:
         except OSError:
             return None
 
+    def get_group_interface_name(self) -> str | None:
+        """Public accessor for the currently active P2P group interface
+        name (e.g. "p2p-wlan1-4"). Callers that need the real ifname --
+        UxPlay's -bindif, for one -- must call this after start_group()
+        returns rather than hardcoding "p2p-wlan1-0": real-hardware testing
+        found the numeric suffix increments with every wpa_supplicant-
+        internal attempt (including ones that failed) and is not
+        guaranteed to be 0."""
+        return self._existing_group_interface()
+
     def start_group(self) -> None:
         existing = self._existing_group_interface()
         if existing is not None:

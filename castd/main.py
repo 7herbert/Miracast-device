@@ -55,13 +55,11 @@ class CastDaemon:
         self.render = RenderProcess()
         self.render_target = RenderTarget()
         self.health = HealthState()
-        self.uxplay = UxPlayProcess(
-            UxPlayConfig(
-                device_name=config.device_name,
-                bind_interface="p2p-wlan1-0",
-                wps_pin=config.wps_pin,
-            )
-        )
+        # Constructed in start(), once the real P2P group interface name is
+        # known -- see the comment there. Real-hardware testing found the
+        # numeric suffix (p2p-wlan1-0, -4, -72, ...) is not stable, so it
+        # cannot be hardcoded here at __init__ time.
+        self.uxplay: UxPlayProcess | None = None
         self._lock = threading.Lock()
 
     def start(self) -> None:
@@ -80,6 +78,17 @@ class CastDaemon:
         )
         self.p2p.configure()
         self.p2p.start_group()
+
+        group_ifname = self.p2p.get_group_interface_name()
+        if group_ifname is None:
+            raise RuntimeError("start_group() returned but no p2p-wlan1-* interface exists")
+        self.uxplay = UxPlayProcess(
+            UxPlayConfig(
+                device_name=self.config.device_name,
+                bind_interface=group_ifname,
+                wps_pin=self.config.wps_pin,
+            )
+        )
 
         dbus_thread = threading.Thread(target=self.p2p.run_forever, daemon=True)
         dbus_thread.start()
