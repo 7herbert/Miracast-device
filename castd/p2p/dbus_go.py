@@ -1,31 +1,32 @@
 """wpa_supplicant D-Bus control for the P2P Group Owner.
 
 Hardware-dependent module: requires `python3-dbus`, `python3-gi`, and a
-running wpa_supplicant with the D-Bus interface enabled (dbus_ctrl_interface
-in wpa_supplicant.conf) and P2P support compiled in. None of that is present
-on a Windows dev box, so this module is syntax-checked (py_compile) only in
-this repo's CI-less verification pass -- it has NOT been exercised against a
-real wpa_supplicant. It is a direct structural port of the D-Bus calls
-proven working in lazycast's newmice.py (GroupAdd, WFDIEs property,
-GroupStarted/WpsFailed signals), replacing polling+wpa_cli text parsing with
-native D-Bus signals so the failure modes documented in the project
-retrospective (pgrep seeing a zombie process, ctrl-socket death going
-undetected) cannot occur here: a lost D-Bus connection raises immediately
-instead of returning stale-but-plausible data.
+running wpa_supplicant with the D-Bus interface enabled. Not importable on
+a Windows dev box (tests/conftest.py stubs it out for import-time checks
+only). As of 2026-07-13, GetInterface/CreateInterface/configure/GroupAdd
+have been confirmed working against a real Pi 4B + RTL8832BU (rtw89_8852bu)
+adapter on Raspberry Pi OS Bookworm -- see the project memory notes for the
+two real bugs real hardware surfaced that no static check could have caught:
+Bookworm's wpa_supplicant.service must be attached to wlan1 at its own
+startup (a drop-in override adding `-i wlan1`), and a rapid GroupAdd retry
+loop (systemd's default RestartSec=3) wedged the driver into rejecting every
+subsequent attempt with nl80211 "Device or resource busy" regardless of
+D-Bus argument correctness.
 
-Needs real-hardware verification (Phase 0 of the project plan) before this
-is trusted for anything beyond a bench test:
-  - GO creation with WFDIEs set actually appears in Windows' Miracast device
-    list within a normal discovery timeout
-  - a fixed WPS PIN (config_methods=display / keypad, see NegotiationError-
-    grade edge case wps_pin vs SHOW-PIN in the project's open-issues list)
-    is honored rather than Windows falling back to a dynamically shown PIN
-  - GO survives a 72-hour soak with the target USB adapter (see hardware
-    trial plan) without the group silently disappearing
+Still needs real-hardware verification:
+  - GO with WFDIEs set actually appears in Windows' Miracast device list
+    within a normal discovery timeout (P2P group creation confirmed; WFD
+    discovery from a real Windows client not yet confirmed)
+  - a fixed WPS PIN (config_methods=display, set via the wpa_p2p.conf file
+    loaded at interface-creation time) is honored rather than Windows
+    falling back to a dynamically shown PIN
+  - GO survives a 72-hour soak with the target USB adapter without the
+    group silently disappearing
 """
 from __future__ import annotations
 
 import logging
+import os
 from dataclasses import dataclass
 from typing import Callable
 
@@ -151,7 +152,27 @@ class P2PGroupOwner:
             WPAS_SERVICE, "WFDIEs", wfd_dbus_array
         )
 
+    def _existing_group_interface(self) -> str | None:
+        """Detect an already-running P2P group via /sys/class/net instead of
+        a D-Bus property. Real-hardware testing found that this build's
+        wpa_supplicant returns the exact same generic
+        "Did not receive correct message arguments" DBusException both for
+        malformed GroupAdd args AND for "a group already exists on this
+        interface" -- the two cases are indistinguishable from the
+        exception alone, so a filesystem check sidesteps needing to trust
+        that error text's meaning at all."""
+        prefix = f"p2p-{self.interface_name}-"
+        try:
+            return next((name for name in os.listdir("/sys/class/net") if name.startswith(prefix)), None)
+        except OSError:
+            return None
+
     def start_group(self) -> None:
+        existing = self._existing_group_interface()
+        if existing is not None:
+            logger.info("P2P group interface %s already exists; skipping GroupAdd", existing)
+            return
+
         # Every value must be an explicit dbus type (not a bare Python bool
         # or int) for the a{sv} signature to marshal correctly -- passing
         # a plain `False`/int here is what previously raised
