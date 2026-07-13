@@ -82,15 +82,19 @@ def negotiate(sock: SocketLike, *, source_ip: str, capabilities: WfdCapabilities
     return session
 
 
-def open_control_connection(source_ip: str, *, timeout: float = 5.0) -> socket.socket:
-    """Connect to the source's RTSP control port. `timeout` is not optional
-    with a None default on purpose -- d2.py's original bug (#15 in the
-    project retrospective) was exactly an un-timed-out connect() that could
-    hang the whole process when a source stopped responding mid-handshake."""
+def listen_for_sources(bind_ip: str, *, port: int = WFD_CONTROL_PORT, backlog: int = 1) -> socket.socket:
+    """Create the sink-side RTSP listener socket.
+
+    Direction matters and an earlier revision had it backwards (an
+    open_control_connection() that dialed OUT to source:7236): per the WFD
+    spec it is the SOURCE that initiates the TCP connection, to the port
+    the sink advertises in its WFD Device Information subelement (7236 --
+    see p2p/wfd_ie.py's build_device_info_subelement, control_port field).
+    lazycast, this project's predecessor, listened for exactly this reason.
+    The caller accept()s connections and hands each one to negotiate();
+    the accepted peer address is how the sink learns the source's IP."""
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    sock.settimeout(timeout)
-    sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    sock.connect((source_ip, WFD_CONTROL_PORT))
-    sock.settimeout(None)
+    sock.bind((bind_ip, port))
+    sock.listen(backlog)
     return sock

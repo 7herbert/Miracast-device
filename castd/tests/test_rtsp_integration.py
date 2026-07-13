@@ -20,7 +20,7 @@ import socket
 import threading
 
 from castd.wfdsink.rtsp import WfdCapabilities
-from castd.wfdsink.session import negotiate
+from castd.wfdsink.session import listen_for_sources, negotiate
 
 SINK_IP = "192.168.173.1"
 SOURCE_IP = "192.168.173.80"
@@ -127,3 +127,19 @@ def test_full_handshake_against_realistic_windows_source():
 
     sink_sock.close()
     source_sock.close()
+
+
+def test_sink_listener_accepts_an_inbound_source_connection():
+    # Direction check: the SOURCE dials the SINK (per the WFD spec and the
+    # 7236 port advertised in our WFD IE), so the sink side must be a
+    # listener. port=0 lets the OS pick a free port so this runs anywhere.
+    listener = listen_for_sources("127.0.0.1", port=0)
+    try:
+        port = listener.getsockname()[1]
+        client = socket.create_connection(("127.0.0.1", port), timeout=5)
+        conn, (peer_ip, _peer_port) = listener.accept()
+        assert peer_ip == "127.0.0.1"
+        client.close()
+        conn.close()
+    finally:
+        listener.close()

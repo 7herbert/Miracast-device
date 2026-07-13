@@ -13,13 +13,15 @@ loop (systemd's default RestartSec=3) wedged the driver into rejecting every
 subsequent attempt with nl80211 "Device or resource busy" regardless of
 D-Bus argument correctness.
 
+Confirmed working since then: the GO appears in Windows' Win+K list (after
+the PrimaryDeviceType category-7 fix in configure()), and Provision
+Discovery request/response completes with Windows displaying the PIN this
+class reports via on_display_pin_needed.
+
 Still needs real-hardware verification:
-  - GO with WFDIEs set actually appears in Windows' Miracast device list
-    within a normal discovery timeout (P2P group creation confirmed; WFD
-    discovery from a real Windows client not yet confirmed)
-  - a fixed WPS PIN (config_methods=display, set via the wpa_p2p.conf file
-    loaded at interface-creation time) is honored rather than Windows
-    falling back to a dynamically shown PIN
+  - the per-attempt registrar authorization (authorize_display_pin, added
+    2026-07-13) actually carries Windows through 802.11 association and
+    the WPS M1-M8 exchange end to end
   - GO survives a 72-hour soak with the target USB adapter without the
     group silently disappearing
 """
@@ -73,12 +75,22 @@ class P2PGroupOwner:
     Real-hardware testing found there is no such thing as a usable *fixed*
     WPS PIN for this flow: config_methods=display tells peers "ask this
     device to display a PIN", and wpa_supplicant generates a brand new
-    random PIN for every single ProvisionDiscoveryRequestDisplayPin,
-    regardless of the Pin= value this class's WPS.Start call sets up at
-    group-start time (that call still runs, and still succeeds, but does
-    not control this). The only way to actually complete pairing is to
-    show the caller (via on_display_pin_needed) whatever PIN wpa_supplicant
-    just generated, live, so a human can read and type it in."""
+    random PIN for every single ProvisionDiscoveryRequestDisplayPin.
+    Completing a pairing therefore takes two actions per attempt, both
+    driven from that signal's handler:
+      1. show the generated PIN to the human (on_display_pin_needed), and
+      2. authorize that same PIN on the GROUP interface's WPS registrar
+         (authorize_display_pin) so the GO's beacons/probe responses gain
+         the Selected Registrar attribute.
+    Skipping step 2 produces the exact stall captured live on 2026-07-13:
+    after the user clicks Connect, Windows re-probes the group SSID every
+    1-2 s waiting for Selected Registrar to appear, never sends a single
+    Authentication/Association frame, and eventually gives up with WCN
+    "operation cancelled". A full unfiltered wpa_supplicant -dd trace of
+    one attempt showed probe request/response traffic only, and the probe
+    responses' WPS IE carried neither Selected Registrar (attr 0x1041) nor
+    Device Password ID (attr 0x1012) -- the two attributes an armed
+    registrar adds, and the ones Windows' WCN enrollee polls for."""
 
     def __init__(
         self,
@@ -86,7 +98,6 @@ class P2PGroupOwner:
         *,
         device_name: str,
         freq_mhz: int,
-        wps_pin: str,
         on_group_started: Callable[[GroupInfo], None],
         on_wps_failed: Callable[[str], None],
         on_display_pin_needed: Callable[[str], None],
@@ -95,8 +106,12 @@ class P2PGroupOwner:
         self.interface_name = interface_name
         self.device_name = device_name
         self.freq_mhz = freq_mhz
-        self.wps_pin = wps_pin
         self.wpa_conf_path = wpa_conf_path
+        # D-Bus object path of the active group interface (p2p-wlan1-N),
+        # captured from GroupStarted; resolved lazily via GetInterface when
+        # castd restarts against an already-existing group (GroupStarted
+        # never re-fires in that case). See _group_interface_object().
+        self._group_iface_path: str | None = None
         self._on_group_started = on_group_started
         self._on_wps_failed = on_wps_failed
         self._on_display_pin_needed = on_display_pin_needed
@@ -278,21 +293,38 @@ class P2PGroupOwner:
         except dbus.DBusException as exc:
             raise RuntimeError(f"GroupAdd failed on {self.interface_name}: {exc}") from exc
 
-    def set_wps_pin(self) -> None:
-        # Real-hardware testing found neither the Group metadata object
-        # (.../Groups/XX, from the GroupStarted signal) nor the interface
-        # object reachable via P2PDevice's "Group" property implement the
-        # WPS interface -- only wlan1's own top-level interface object
-        # does (confirmed via full Introspect(): P2PDevice and WPS are
-        # both implemented on that SAME object, not on any
-        # group-specific object). Call Start on self.iface_obj directly.
-        wps_iface = dbus.Interface(self.iface_obj, IFACE_WPS)
+    def _group_interface_object(self):
+        """D-Bus object for the P2P *group* interface (p2p-wlan1-N), not the
+        parent device interface. The WPS registrar whose state is reflected
+        in the GO's beacon/probe-response WPS IE lives on the group
+        interface: an earlier iteration called WPS.Start on wlan1's own
+        object instead (that call "succeeded") but the frames Windows was
+        actually watching never gained Selected Registrar, which is part of
+        why the fixed-PIN experiment misled this project into deleting the
+        registrar call entirely rather than re-targeting it."""
+        path = self._group_iface_path
+        if path is None:
+            ifname = self._existing_group_interface()
+            if ifname is None:
+                raise RuntimeError("no P2P group interface exists to arm a WPS registrar on")
+            path = self.wpas.GetInterface(ifname)
+        return self.bus.get_object(WPAS_SERVICE, path)
+
+    def authorize_display_pin(self, pin: str) -> None:
+        """Arm the GO's WPS registrar with the PIN wpa_supplicant just
+        generated for one ProvisionDiscoveryRequestDisplayPin attempt.
+        This is what flips Selected Registrar=TRUE (+ Device Password ID)
+        in the group's beacons/probe responses -- the signal Windows' WCN
+        flow polls for after the user clicks Connect. Without this call the
+        peer never even attempts 802.11 association (observed live on
+        2026-07-13; see the class docstring)."""
+        wps_iface = dbus.Interface(self._group_interface_object(), IFACE_WPS)
         wps_iface.Start(
             dbus.Dictionary(
                 {
                     "Role": dbus.String("registrar"),
                     "Type": dbus.String("pin"),
-                    "Pin": dbus.String(self.wps_pin),
+                    "Pin": dbus.String(pin),
                 },
                 signature="sv",
             )
@@ -305,32 +337,36 @@ class P2PGroupOwner:
         return handler
 
     def _handle_display_pin_request(self, peer_object: str, pin: str) -> None:
-        # This IS the actual PIN a human must type into the connecting
-        # device -- see the class docstring. It is generated fresh by
-        # wpa_supplicant for this specific negotiation attempt and is
-        # unrelated to self.wps_pin.
+        # This IS the actual PIN for this specific negotiation attempt,
+        # generated fresh by wpa_supplicant -- see the class docstring.
         logger.info("WPS display PIN requested by %s: %s", peer_object, pin)
+        try:
+            self.authorize_display_pin(str(pin))
+            logger.info("WPS registrar armed with display PIN on group interface")
+        except (dbus.DBusException, RuntimeError):
+            # Still show the PIN below: a blank screen would hide the one
+            # piece of live state a human in the room can act on, and the
+            # exception text in the journal is the actual diagnostic.
+            logger.exception("failed to arm WPS registrar with display PIN")
         self._on_display_pin_needed(str(pin))
 
     def _handle_group_started(self, properties: dict) -> None:
         group_object_path = properties["group_object"]
-        logger.info("P2P group started: %s", group_object_path)
+        # interface_object is the D-Bus path of the group interface itself
+        # (p2p-wlan1-N). authorize_display_pin must target THAT interface's
+        # WPS registrar, so capture it here where wpa_supplicant hands it
+        # to us for free instead of re-resolving it per attempt.
+        self._group_iface_path = str(properties.get("interface_object", "")) or None
+        logger.info("P2P group started: %s (interface object %s)", group_object_path, self._group_iface_path)
         info = GroupInfo(
             group_object_path=group_object_path,
             interface_name=self.interface_name,
             frequency_mhz=self.freq_mhz,
         )
-        # Real-hardware testing found calling set_wps_pin() here -- WPS.Start
-        # with a fixed Pin= -- actively BREAKS the display-PIN flow rather
-        # than being merely useless: it registers self.wps_pin as the only
-        # value the WPS registrar will accept, while wpa_supplicant
-        # separately auto-generates and validates its OWN fresh PIN per
-        # ProvisionDiscoveryRequestDisplayPin request. The two conflict, so
-        # even a peer that correctly enters the displayed (live, correct)
-        # PIN fails to authenticate. config_methods=display alone (set via
-        # the config file at CreateInterface time) is sufficient for
-        # wpa_supplicant to manage this on its own; do not call
-        # set_wps_pin() here.
+        # Deliberately NO WPS.Start here: a fixed PIN registered at
+        # group-start time is wrong twice over (wrong PIN -- wpa_supplicant
+        # generates a fresh one per attempt -- and wrong moment). The
+        # per-attempt registrar arming lives in _handle_display_pin_request.
         self._on_group_started(info)
 
     def _handle_wps_failed(self, status, *rest) -> None:

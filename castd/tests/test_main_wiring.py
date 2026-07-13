@@ -64,10 +64,11 @@ def test_miracast_connect_success_starts_streaming_pipeline(monkeypatch):
     daemon = make_daemon(monkeypatch)
 
     fake_session = WfdSessionParams(sink_rtp_port=1028, server_port=48753, session_id="123")
-    monkeypatch.setattr(main_module, "open_control_connection", lambda source_ip, **k: object())
     monkeypatch.setattr(main_module, "negotiate", lambda sock, **k: fake_session)
 
-    daemon.handle_miracast_connected("192.168.173.80")
+    # The source dials us and the accept loop hands the connected socket
+    # in -- the daemon never opens an outbound control connection.
+    daemon.handle_miracast_connected("192.168.173.80", sock=object())
 
     assert daemon.arbiter.state is State.MIRACAST
     assert "stop" in daemon.uxplay.calls  # AirPlay advertising paused
@@ -81,12 +82,12 @@ def test_miracast_connect_success_starts_streaming_pipeline(monkeypatch):
 def test_miracast_connect_failure_falls_back_to_idle(monkeypatch):
     daemon = make_daemon(monkeypatch)
 
-    def boom(source_ip, **k):
-        raise OSError("connection refused")
+    def boom(sock, **k):
+        raise OSError("connection reset during handshake")
 
-    monkeypatch.setattr(main_module, "open_control_connection", boom)
+    monkeypatch.setattr(main_module, "negotiate", boom)
 
-    daemon.handle_miracast_connected("192.168.173.80")
+    daemon.handle_miracast_connected("192.168.173.80", sock=object())
 
     assert daemon.arbiter.state is State.IDLE
     assert "start" in daemon.uxplay.calls  # AirPlay advertising resumed after failed attempt
@@ -95,10 +96,9 @@ def test_miracast_connect_failure_falls_back_to_idle(monkeypatch):
 def test_miracast_disconnect_stops_render_and_shows_idle_screen(monkeypatch):
     daemon = make_daemon(monkeypatch)
     fake_session = WfdSessionParams(sink_rtp_port=1028, server_port=1, session_id="1")
-    monkeypatch.setattr(main_module, "open_control_connection", lambda source_ip, **k: object())
     monkeypatch.setattr(main_module, "negotiate", lambda sock, **k: fake_session)
 
-    daemon.handle_miracast_connected("192.168.173.80")
+    daemon.handle_miracast_connected("192.168.173.80", sock=object())
     daemon.handle_miracast_disconnected()
 
     assert daemon.arbiter.state is State.IDLE
@@ -109,8 +109,7 @@ def test_miracast_disconnect_stops_render_and_shows_idle_screen(monkeypatch):
 def test_health_state_reflects_arbiter_after_actions(monkeypatch):
     daemon = make_daemon(monkeypatch)
     fake_session = WfdSessionParams(sink_rtp_port=1028, server_port=1, session_id="1")
-    monkeypatch.setattr(main_module, "open_control_connection", lambda source_ip, **k: object())
     monkeypatch.setattr(main_module, "negotiate", lambda sock, **k: fake_session)
 
-    daemon.handle_miracast_connected("192.168.173.80")
+    daemon.handle_miracast_connected("192.168.173.80", sock=object())
     assert daemon.health.snapshot()["state"] == "MIRACAST"

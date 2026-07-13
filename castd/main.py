@@ -36,11 +36,12 @@ from castd.config import ConfigError, RoomConfig, parse_room_config
 from castd.fsm.state_machine import Action, CastArbiter, Event
 from castd.health import HealthState, serve_forever
 from castd.p2p.dbus_go import GroupInfo, P2PGroupOwner
+from castd.p2p.group_network import SINK_IP, GroupNetwork
 from castd.render.gstreamer import RenderProcess, RenderTarget, build_idle_screen_pipeline, build_wfd_pipeline_description
 from castd.render.idle_screen import render_idle_screen
 from castd import sdnotify
 from castd.wfdsink.rtsp import NegotiationError, WfdCapabilities
-from castd.wfdsink.session import negotiate, open_control_connection
+from castd.wfdsink.session import listen_for_sources, negotiate
 
 logger = logging.getLogger("castd")
 
@@ -56,11 +57,13 @@ class CastDaemon:
         self.render = RenderProcess()
         self.render_target = RenderTarget()
         self.health = HealthState()
+        self.group_network = GroupNetwork()
         # Constructed in start(), once the real P2P group interface name is
         # known -- see the comment there. Real-hardware testing found the
         # numeric suffix (p2p-wlan1-0, -4, -72, ...) is not stable, so it
         # cannot be hardcoded here at __init__ time.
         self.uxplay: UxPlayProcess | None = None
+        self._rtsp_listener = None
         self._lock = threading.Lock()
 
     def start(self) -> None:
@@ -73,7 +76,6 @@ class CastDaemon:
             "wlan1",
             device_name=self.config.device_name,
             freq_mhz=self.config.freq_mhz,
-            wps_pin=self.config.wps_pin,
             on_group_started=self._on_group_started,
             on_wps_failed=self._on_wps_failed,
             on_display_pin_needed=self._on_display_pin_needed,
@@ -84,6 +86,11 @@ class CastDaemon:
         group_ifname = self.p2p.get_group_interface_name()
         if group_ifname is None:
             raise RuntimeError("start_group() returned but no p2p-wlan1-* interface exists")
+        # Covers BOTH startup paths: fresh GroupAdd (GroupStarted will also
+        # fire and call this again, harmlessly -- both pieces are
+        # idempotent) and castd restarting against a group that already
+        # exists, where GroupStarted never re-fires.
+        self._ensure_group_services(group_ifname)
         self.uxplay = UxPlayProcess(
             UxPlayConfig(
                 device_name=self.config.device_name,
@@ -115,7 +122,36 @@ class CastDaemon:
 
     def _on_group_started(self, info: GroupInfo) -> None:
         logger.info("group started on %s @ %d MHz", info.interface_name, info.frequency_mhz)
-        threading.Thread(target=self._wait_for_miracast_client, args=(info,), daemon=True).start()
+        group_ifname = self.p2p.get_group_interface_name()
+        if group_ifname is None:
+            logger.error("GroupStarted fired but no p2p group interface exists in /sys/class/net")
+            return
+        self._ensure_group_services(group_ifname)
+
+    def _ensure_group_services(self, group_ifname: str) -> None:
+        """Everything a live GO needs beyond what wpa_supplicant provides:
+        the sink IP + DHCP server (a source DHCPs immediately after WPS
+        completes -- nothing else on the Pi would answer it), and the RTSP
+        control listener the source then connects to on port 7236 (the port
+        advertised in our WFD IE). Idempotent; called from both startup
+        paths, see start()."""
+        self.group_network.start(group_ifname)
+        if self._rtsp_listener is None:
+            self._rtsp_listener = listen_for_sources(SINK_IP)
+            threading.Thread(target=self._accept_sources_loop, daemon=True).start()
+            logger.info("RTSP sink listening on %s:7236", SINK_IP)
+
+    def _accept_sources_loop(self) -> None:
+        while True:
+            try:
+                sock, (source_ip, source_port) = self._rtsp_listener.accept()
+            except OSError:
+                logger.info("RTSP listener closed; accept loop exiting")
+                return
+            logger.info("RTSP control connection from %s:%d", source_ip, source_port)
+            threading.Thread(
+                target=self.handle_miracast_connected, args=(source_ip, sock), daemon=True
+            ).start()
 
     def _on_wps_failed(self, status: str) -> None:
         logger.warning("WPS failed: %s", status)
@@ -148,23 +184,24 @@ class CastDaemon:
             sdnotify.notify(watchdog=True, status=self.arbiter.state.name)
             time.sleep(interval_s)
 
-    def _wait_for_miracast_client(self, info: GroupInfo) -> None:
-        # Placeholder for the real "AP-STA-CONNECTED then attempt WFD
-        # negotiation" flow; the actual STA-connect signal wiring is part of
-        # Phase 1 (needs real hardware to observe wpa_supplicant's event
-        # shape for this adapter). Structure shown here is what main.py
-        # will call once that signal exists.
-        pass
-
-    def handle_miracast_connected(self, source_ip: str) -> None:
+    def handle_miracast_connected(self, source_ip: str, sock) -> None:
+        """Run the WFD handshake over an RTSP control connection the source
+        just opened to us (see _accept_sources_loop -- the source dials the
+        sink, never the reverse)."""
         with self._lock:
             transition = self.arbiter.handle(Event.MIRACAST_CONNECTED)
         self._apply_actions(transition.actions)
         try:
-            sock = open_control_connection(source_ip)
+            # Bounded handshake: an un-timed-out recv() hanging the whole
+            # session forever was d2.py's original bug (#15 in the project
+            # retrospective). Cleared again once streaming is confirmed.
+            if hasattr(sock, "settimeout"):
+                sock.settimeout(15.0)
             session = negotiate(
                 sock, source_ip=source_ip, capabilities=WfdCapabilities(device_name=self.config.device_name)
             )
+            if hasattr(sock, "settimeout"):
+                sock.settimeout(None)
             self.render.stop()
             self.render.start(build_wfd_pipeline_description(udp_port=WFD_UDP_PORT, target=self.render_target))
             logger.info("Miracast streaming started, session=%s", session.session_id)
