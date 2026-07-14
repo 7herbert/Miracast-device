@@ -34,6 +34,27 @@ def test_device_info_defaults_to_primary_sink_and_available():
     assert bitmap & (1 << 4)  # WFD_AVAILABLE_FOR_SESSION
 
 
+def test_session_availability_field_is_exactly_01_not_reserved():
+    # Bits 4-5 are ONE two-bit field: 01 = available, 11 = reserved. A
+    # previous revision set both bits (mislabeling bit 5) and a real
+    # Windows 11 source completed WPS+DHCP but never opened RTSP against
+    # that reserved value. Lock the field to the only valid "available"
+    # encoding.
+    data = build_device_info_subelement()
+    bitmap = int.from_bytes(data[3:5], "big")
+    availability = (bitmap >> 4) & 0b11
+    assert availability == 0b01
+
+
+def test_device_info_claims_no_unimplemented_capabilities():
+    # WSD (bit 6), TDLS preference (bit 7), content protection (bit 8),
+    # and time sync (bit 9) are promises the RTSP layer does not honor --
+    # none may be advertised.
+    data = build_device_info_subelement()
+    bitmap = int.from_bytes(data[3:5], "big")
+    assert bitmap & 0b1111000000 == 0
+
+
 def test_device_info_can_be_built_as_source_type():
     data = build_device_info_subelement(device_type=WFD_SOURCE)
     bitmap = int.from_bytes(data[3:5], "big")

@@ -19,10 +19,21 @@ WFD_PRIMARY_SINK = 0b01
 WFD_SECONDARY_SINK = 0b10
 WFD_SOURCE_OR_SINK = 0b11
 
-# Optional capability bits (bit positions per spec section 5.1.2)
-WFD_AVAILABLE_FOR_SESSION = 1 << 4
-WFD_SERVICE_DISCOVERY_SUPPORTED = 1 << 5
-WFD_PREFERRED_CONNECTIVITY_P2P = 1 << 6
+# Bit positions per spec section 5.1.2 Table 5-2. Careful: bits 4-5 are a
+# single TWO-bit "WFD Session Availability" field (00 = not available,
+# 01 = available, 10/11 = reserved) -- an earlier revision mislabeled
+# bit 5 as "service discovery" (really bit 6) and set it alongside bit 4,
+# broadcasting the reserved value 0b11. That survived all the way to a
+# real Windows 11 source completing association/WPS/DHCP and then never
+# opening the RTSP connection -- consistent with the source parsing the
+# sink as not-available-for-session at the point it decides to start one.
+# lazycast's known-working value was 0x0111 (primary sink, availability
+# 01, content protection); we send the same minus the CP bit, since this
+# sink does not actually implement HDCP and must not invite the source
+# to try it.
+WFD_AVAILABLE_FOR_SESSION = 1 << 4  # availability field (bits 5:4) = 0b01
+WFD_SERVICE_DISCOVERY_SUPPORTED = 1 << 6
+WFD_PREFERRED_CONNECTIVITY_TDLS = 1 << 7  # unset = P2P
 WFD_CONTENT_PROTECTION_SUPPORTED = 1 << 8
 WFD_TIME_SYNCHRONIZATION_SUPPORTED = 1 << 9
 
@@ -41,10 +52,14 @@ def build_device_info_subelement(
     if not (0 <= max_throughput_mbps <= 0xFFFF):
         raise ValueError(f"max_throughput_mbps out of range: {max_throughput_mbps}")
 
+    # Keep the bitmap minimal: device type + session availability only.
+    # Every extra capability bit is a promise the RTSP layer must then
+    # honor (WSD implies M15-style service discovery, CP implies HDCP);
+    # claiming them without implementing them gives a real Windows source
+    # grounds to bail out mid-setup.
     bitmap = device_type & 0b11
     if available_for_session:
         bitmap |= WFD_AVAILABLE_FOR_SESSION
-    bitmap |= WFD_SERVICE_DISCOVERY_SUPPORTED
 
     payload = bitmap.to_bytes(2, "big") + control_port.to_bytes(2, "big") + max_throughput_mbps.to_bytes(2, "big")
     subelem_id = 0
