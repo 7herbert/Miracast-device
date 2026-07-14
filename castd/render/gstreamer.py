@@ -36,11 +36,18 @@ class RenderTarget:
 def build_wfd_pipeline_description(*, udp_port: int, target: RenderTarget) -> str:
     """gst-launch-1.0 style pipeline string for a Miracast/WFD MPEG-TS/H.264
     stream arriving over RTP on `udp_port`. v4l2h264dec uses the Pi 4's
-    hardware decoder; kmssink writes straight to the DRM plane."""
+    hardware decoder; kmssink writes straight to the DRM plane.
+
+    clock-rate=90000 is mandatory in the udpsrc caps: RTP caps must be
+    fully fixed before the pipeline can preroll, and on real hardware
+    (2026-07-14) omitting it killed the pipeline at start with "Filter
+    caps do not completely specify the output format / Output caps are
+    unfixed: ... clock-rate=(int)[ 1, 2147483647 ]". 90000 Hz is the
+    fixed RTP clock for MPEG-TS (RFC 3551, payload 33)."""
     connector = f" connector-id={target.connector_id}" if target.connector_id is not None else ""
     return (
         f"udpsrc port={udp_port} "
-        f"! application/x-rtp,media=video,encoding-name=MP2T,payload=33 "
+        f"! application/x-rtp,media=video,encoding-name=MP2T,payload=33,clock-rate=90000 "
         f"! rtpjitterbuffer latency=200 "
         f"! rtpmp2tdepay "
         f"! tsdemux name=demux "

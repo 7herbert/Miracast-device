@@ -246,7 +246,12 @@ class CastDaemon:
         with self._lock:
             transition = self.arbiter.handle(Event.MIRACAST_CONNECTED)
         self._apply_actions(transition.actions)
-        negotiator = WfdNegotiator(WfdCapabilities(device_name=self.config.device_name))
+        # audio_codec must match what the render pipeline actually decodes
+        # (aacparse ! avdec_aac -- see render/gstreamer.py). The default
+        # WfdCapabilities value is LPCM, and advertising that while
+        # decoding AAC means Windows ships LPCM PES packets the audio
+        # branch can't parse, killing the whole pipeline mid-session.
+        negotiator = WfdNegotiator(WfdCapabilities(device_name=self.config.device_name, audio_codec="AAC"))
         try:
             # Bounded handshake: an un-timed-out recv() hanging the whole
             # session forever was d2.py's original bug (#15 in the project
