@@ -199,6 +199,16 @@ class P2PGroupOwner:
             self.bus.add_signal_receiver(
                 self._make_signal_logger(f"WPS.{signal_name}"), dbus_interface=IFACE_WPS, signal_name=signal_name
             )
+        # AP-side association visibility: the group interface (GO = AP
+        # mode) emits these when a station is 802.11-associated and
+        # 802.1X/WPS-authorized. Live debugging on 2026-07-14 had to infer
+        # "did the source associate at all?" from the *absence* of WPS
+        # signals over a 67-second window -- one log line at the moment of
+        # association removes that guesswork for every future run.
+        for signal_name in ("StaAuthorized", "StaDeauthorized"):
+            self.bus.add_signal_receiver(
+                self._make_signal_logger(signal_name), dbus_interface=IFACE_INTERFACE, signal_name=signal_name
+            )
 
     def configure(self) -> None:
         self.props_iface.Set(
