@@ -33,13 +33,25 @@ class SocketLike(Protocol):
     def sendall(self, data: bytes) -> None: ...
 
 
-def negotiate(sock: SocketLike, *, source_ip: str, capabilities: WfdCapabilities, sink_rtp_port: int = 1028) -> WfdSessionParams:
+def negotiate(
+    sock: SocketLike,
+    *,
+    source_ip: str,
+    capabilities: WfdCapabilities,
+    sink_rtp_port: int = 1028,
+    negotiator: WfdNegotiator | None = None,
+) -> WfdSessionParams:
     """Run the full M1-M7 handshake over `sock`. Returns the negotiated
     session params on success. Raises NegotiationError (from rtsp.py) or
     socket.error/OSError on transport failure -- the caller (main.py) is
     expected to catch both and drive the FSM back to IDLE, not to treat a
-    negotiation failure as fatal to the whole daemon."""
-    negotiator = WfdNegotiator(capabilities, sink_rtp_port=sink_rtp_port)
+    negotiation failure as fatal to the whole daemon.
+
+    Pass `negotiator` to keep a handle on the session's state machine --
+    required for run_steady_state below, which continues on the same
+    negotiator after M7."""
+    if negotiator is None:
+        negotiator = WfdNegotiator(capabilities, sink_rtp_port=sink_rtp_port)
 
     request = sock.recv(RECV_BUFSIZE).decode()
     logger.debug("M1 <- %r", request)
@@ -81,6 +93,41 @@ def negotiate(sock: SocketLike, *, source_ip: str, capabilities: WfdCapabilities
         session.server_port, session.session_id, session.uibc_port,
     )
     return session
+
+
+def run_steady_state(sock: SocketLike, negotiator: WfdNegotiator, *, keepalive_timeout: float = 60.0) -> None:
+    """Pump the RTSP control connection for as long as the session lives:
+    ack the source's periodic M16 GET_PARAMETER keep-alives (and any
+    SET_PARAMETER), returning when the source ends the session -- explicit
+    TEARDOWN trigger, closed connection (empty recv), socket error, or
+    keep-alive silence past `keepalive_timeout` (sources send M16 at least
+    every ~30 s).
+
+    This loop is not optional. The 2026-07-14 live run had negotiate()
+    return and the socket fall out of scope: CPython closed it on GC,
+    tcpdump showed our FIN 82 ms after the PLAY ack, and Windows tore the
+    entire session down (StaDeauthorized) half a second later."""
+    if hasattr(sock, "settimeout"):
+        sock.settimeout(keepalive_timeout)
+    try:
+        while True:
+            try:
+                data = sock.recv(RECV_BUFSIZE)
+            except TimeoutError:
+                logger.warning("no RTSP traffic for %.0fs; treating session as dead", keepalive_timeout)
+                return
+            except OSError:
+                logger.info("RTSP control connection error; session over")
+                return
+            message = data.decode(errors="replace")
+            if message:
+                for ack in negotiator.build_steady_state_ack(message):
+                    sock.sendall(ack.encode())
+            if negotiator.is_teardown(message):
+                logger.info("source ended the RTSP session (teardown or connection close)")
+                return
+    finally:
+        negotiator.mark_torn_down()
 
 
 def open_control_connection(

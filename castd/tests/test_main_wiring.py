@@ -115,12 +115,54 @@ def test_health_state_reflects_arbiter_after_actions(monkeypatch):
     assert daemon.health.snapshot()["state"] == "MIRACAST"
 
 
-def test_station_authorized_dials_source_from_its_lease(monkeypatch):
+class FakeControlSock:
+    def __init__(self) -> None:
+        self.closed = False
+
+    def close(self) -> None:
+        self.closed = True
+
+
+def test_control_channel_close_returns_daemon_to_idle(monkeypatch):
+    # The 2026-07-14 regression: session negotiated, socket dropped, but
+    # the FSM stayed in MIRACAST forever, so every reconnect was rejected
+    # with "already in a Miracast session".
+    daemon = make_daemon(monkeypatch)
+    fake_session = WfdSessionParams(sink_rtp_port=1028, server_port=1, session_id="1")
+    monkeypatch.setattr(main_module, "negotiate", lambda sock, **k: fake_session)
+    monkeypatch.setattr(main_module, "run_steady_state", lambda sock, neg, **k: None)
+
+    sock = FakeControlSock()
+    negotiator = daemon.handle_miracast_connected("192.168.173.80", sock=sock)
+    assert negotiator is not None
+    assert daemon.arbiter.state is State.MIRACAST
+
+    daemon._pump_control_channel(sock, negotiator)
+
+    assert sock.closed
+    assert daemon.arbiter.state is State.IDLE
+    assert "start" in daemon.uxplay.calls  # AirPlay advertising resumed
+
+
+def test_failed_negotiation_returns_none(monkeypatch):
+    daemon = make_daemon(monkeypatch)
+
+    def boom(sock, **k):
+        raise OSError("handshake died")
+
+    monkeypatch.setattr(main_module, "negotiate", boom)
+    assert daemon.handle_miracast_connected("192.168.173.80", sock=object()) is None
+
+
+def test_station_authorized_runs_the_full_session_lifecycle(monkeypatch):
     # The full post-WPS chain: StaAuthorized MAC -> lease lookup -> sink
-    # DIALS the source (never listens for it) -> handshake -> MIRACAST.
+    # DIALS the source (never listens for it) -> M1-M7 -> control channel
+    # pumped while in MIRACAST -> source leaves -> clean return to IDLE.
     daemon = make_daemon(monkeypatch)
     fake_session = WfdSessionParams(sink_rtp_port=1028, server_port=1, session_id="1")
     dialed = []
+    states_while_pumping = []
+    sock = FakeControlSock()
 
     monkeypatch.setattr(
         main_module, "find_lease_ip", lambda mac, *a, **k: "192.168.173.93" if mac == "12:5f:ad:5c:f4:13" else None
@@ -128,15 +170,20 @@ def test_station_authorized_dials_source_from_its_lease(monkeypatch):
 
     def fake_dial(source_ip, **k):
         dialed.append(source_ip)
-        return object()
+        return sock
 
     monkeypatch.setattr(main_module, "open_control_connection", fake_dial)
-    monkeypatch.setattr(main_module, "negotiate", lambda sock, **k: fake_session)
+    monkeypatch.setattr(main_module, "negotiate", lambda s, **k: fake_session)
+    monkeypatch.setattr(
+        main_module, "run_steady_state", lambda s, n, **k: states_while_pumping.append(daemon.arbiter.state)
+    )
 
     daemon._connect_to_authorized_source("12:5f:ad:5c:f4:13")
 
     assert dialed == ["192.168.173.93"]
-    assert daemon.arbiter.state is State.MIRACAST
+    assert states_while_pumping == [State.MIRACAST]  # streaming while the channel was pumped
+    assert daemon.arbiter.state is State.IDLE  # clean teardown after the source left
+    assert sock.closed
 
 
 def test_station_authorized_gives_up_cleanly_without_a_lease(monkeypatch):

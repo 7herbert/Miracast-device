@@ -41,8 +41,8 @@ from castd.p2p.group_network import SINK_IP, GroupNetwork, find_lease_ip
 from castd.render.gstreamer import RenderProcess, RenderTarget, build_idle_screen_pipeline, build_wfd_pipeline_description
 from castd.render.idle_screen import render_idle_screen
 from castd import sdnotify
-from castd.wfdsink.rtsp import NegotiationError, WfdCapabilities
-from castd.wfdsink.session import listen_for_sources, negotiate, open_control_connection
+from castd.wfdsink.rtsp import NegotiationError, WfdCapabilities, WfdNegotiator
+from castd.wfdsink.session import listen_for_sources, negotiate, open_control_connection, run_steady_state
 
 logger = logging.getLogger("castd")
 
@@ -172,7 +172,26 @@ class CastDaemon:
         except OSError:
             logger.exception("could not open RTSP control connection to %s:7236", source_ip)
             return
-        self.handle_miracast_connected(source_ip, sock)
+        self._run_source_session(source_ip, sock)
+
+    def _run_source_session(self, source_ip: str, sock) -> None:
+        """One source's whole session lifetime, on the current thread:
+        M1-M7 handshake, then pump the control channel until the source
+        leaves, then FSM back to IDLE."""
+        negotiator = self.handle_miracast_connected(source_ip, sock)
+        if negotiator is not None:
+            self._pump_control_channel(sock, negotiator)
+
+    def _pump_control_channel(self, sock, negotiator: WfdNegotiator) -> None:
+        try:
+            run_steady_state(sock, negotiator)
+        finally:
+            try:
+                sock.close()
+            except OSError:
+                pass
+            logger.info("RTSP control channel closed; tearing down Miracast session")
+            self.handle_miracast_disconnected()
 
     def _accept_sources_loop(self) -> None:
         while True:
@@ -183,7 +202,7 @@ class CastDaemon:
                 return
             logger.info("RTSP control connection from %s:%d", source_ip, source_port)
             threading.Thread(
-                target=self.handle_miracast_connected, args=(source_ip, sock), daemon=True
+                target=self._run_source_session, args=(source_ip, sock), daemon=True
             ).start()
 
     def _on_wps_failed(self, status: str) -> None:
@@ -217,30 +236,35 @@ class CastDaemon:
             sdnotify.notify(watchdog=True, status=self.arbiter.state.name)
             time.sleep(interval_s)
 
-    def handle_miracast_connected(self, source_ip: str, sock) -> None:
-        """Run the WFD handshake over an RTSP control connection the source
-        just opened to us (see _accept_sources_loop -- the source dials the
-        sink, never the reverse)."""
+    def handle_miracast_connected(self, source_ip: str, sock) -> WfdNegotiator | None:
+        """Run the WFD M1-M7 handshake over an RTSP control connection to
+        the source. Returns the session's negotiator on success -- the
+        caller MUST then keep pumping the control channel with it (see
+        _pump_control_channel); dropping the socket ends the session from
+        the source's point of view. Returns None on failure (FSM already
+        driven back to IDLE)."""
         with self._lock:
             transition = self.arbiter.handle(Event.MIRACAST_CONNECTED)
         self._apply_actions(transition.actions)
+        negotiator = WfdNegotiator(WfdCapabilities(device_name=self.config.device_name))
         try:
             # Bounded handshake: an un-timed-out recv() hanging the whole
             # session forever was d2.py's original bug (#15 in the project
-            # retrospective). Cleared again once streaming is confirmed.
+            # retrospective). run_steady_state sets its own keep-alive
+            # timeout afterwards.
             if hasattr(sock, "settimeout"):
                 sock.settimeout(15.0)
             session = negotiate(
-                sock, source_ip=source_ip, capabilities=WfdCapabilities(device_name=self.config.device_name)
+                sock, source_ip=source_ip, capabilities=negotiator.capabilities, negotiator=negotiator
             )
-            if hasattr(sock, "settimeout"):
-                sock.settimeout(None)
             self.render.stop()
             self.render.start(build_wfd_pipeline_description(udp_port=WFD_UDP_PORT, target=self.render_target))
             logger.info("Miracast streaming started, session=%s", session.session_id)
+            return negotiator
         except (NegotiationError, OSError):
             logger.exception("Miracast negotiation failed for %s", source_ip)
             self.handle_miracast_disconnected()
+            return None
 
     def handle_miracast_disconnected(self) -> None:
         with self._lock:

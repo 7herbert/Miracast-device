@@ -19,8 +19,8 @@ from __future__ import annotations
 import socket
 import threading
 
-from castd.wfdsink.rtsp import WfdCapabilities
-from castd.wfdsink.session import listen_for_sources, negotiate
+from castd.wfdsink.rtsp import STATE_STREAMING, WfdCapabilities, WfdNegotiator
+from castd.wfdsink.session import listen_for_sources, negotiate, run_steady_state
 
 SINK_IP = "192.168.173.1"
 SOURCE_IP = "192.168.173.80"
@@ -125,6 +125,50 @@ def test_full_handshake_against_realistic_windows_source():
     assert session.server_port == 48753
     assert session.session_id == "8734659201"
 
+    sink_sock.close()
+    source_sock.close()
+
+
+def _streaming_negotiator() -> WfdNegotiator:
+    neg = WfdNegotiator(WfdCapabilities(device_name="MR-3F-A"))
+    neg.state = STATE_STREAMING
+    return neg
+
+
+def test_steady_state_acks_keepalive_and_exits_when_source_closes():
+    # The M16 keep-alive loop after M7. Real-hardware lesson (2026-07-14):
+    # without this loop the sink-side socket got GC-closed 82 ms after
+    # PLAY and Windows tore the whole session down within half a second.
+    sink_sock, source_sock = socket.socketpair()
+    neg = _streaming_negotiator()
+    pump = threading.Thread(target=run_steady_state, args=(sink_sock, neg))
+    pump.start()
+
+    source_sock.sendall(b"GET_PARAMETER rtsp://localhost/wfd1.0 RTSP/1.0\r\nCSeq: 10\r\n\r\n")
+    ack = source_sock.recv(4096).decode()
+    assert "200 OK" in ack
+    assert "CSeq: 10" in ack
+
+    source_sock.close()  # source ends the session
+    pump.join(timeout=5)
+    assert not pump.is_alive()
+    sink_sock.close()
+
+
+def test_steady_state_acks_then_exits_on_teardown_trigger():
+    sink_sock, source_sock = socket.socketpair()
+    neg = _streaming_negotiator()
+    pump = threading.Thread(target=run_steady_state, args=(sink_sock, neg))
+    pump.start()
+
+    source_sock.sendall(
+        b"SET_PARAMETER rtsp://localhost/wfd1.0 RTSP/1.0\r\nCSeq: 11\r\n\r\nwfd_trigger_method: TEARDOWN\r\n"
+    )
+    ack = source_sock.recv(4096).decode()
+    assert "200 OK" in ack
+
+    pump.join(timeout=5)
+    assert not pump.is_alive()
     sink_sock.close()
     source_sock.close()
 
