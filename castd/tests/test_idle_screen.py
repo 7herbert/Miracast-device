@@ -28,3 +28,25 @@ def test_creates_parent_directories(tmp_path):
     out = tmp_path / "nested" / "dir" / "idle.png"
     render_idle_screen(str(out), room_name="X", width=320, height=180)
     assert out.exists()
+
+
+def test_renders_with_wifi_footer(tmp_path):
+    out = tmp_path / "idle_wifi.png"
+    render_idle_screen(
+        str(out), room_name="MR-3F-A", wifi_ssid="DIRECT-Cj", wifi_password="s3cr3tpass", width=640, height=360
+    )
+    assert out.exists()
+
+
+def test_renders_pin_and_wifi_footer_together(tmp_path):
+    out = tmp_path / "idle_pin_wifi.png"
+    render_idle_screen(
+        str(out),
+        room_name="MR-3F-A",
+        pin="12345670",
+        wifi_ssid="DIRECT-Cj",
+        wifi_password="s3cr3tpass",
+        width=640,
+        height=360,
+    )
+    assert out.exists()

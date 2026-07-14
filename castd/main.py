@@ -65,6 +65,7 @@ class CastDaemon:
         # cannot be hardcoded here at __init__ time.
         self.uxplay: UxPlayProcess | None = None
         self._rtsp_listener = None
+        self._wifi_credentials: tuple[str, str] | None = None
         self._lock = threading.Lock()
 
     def start(self) -> None:
@@ -93,13 +94,9 @@ class CastDaemon:
         # idempotent) and castd restarting against a group that already
         # exists, where GroupStarted never re-fires.
         self._ensure_group_services(group_ifname)
-        self.uxplay = UxPlayProcess(
-            UxPlayConfig(
-                device_name=self.config.device_name,
-                bind_interface=group_ifname,
-                wps_pin=self.config.wps_pin,
-            )
-        )
+        self._wifi_credentials = self.p2p.get_group_credentials()
+        self._show_idle_screen()  # re-render now that the Wi-Fi footer is known
+        self.uxplay = UxPlayProcess(UxPlayConfig(device_name=self.config.device_name))
 
         dbus_thread = threading.Thread(target=self.p2p.run_forever, daemon=True)
         dbus_thread.start()
@@ -129,6 +126,10 @@ class CastDaemon:
             logger.error("GroupStarted fired but no p2p group interface exists in /sys/class/net")
             return
         self._ensure_group_services(group_ifname)
+        # A (re)created group means a fresh SSID/passphrase -- update the
+        # AirPlay footer on the kiosk screen to match.
+        self._wifi_credentials = self.p2p.get_group_credentials()
+        self._show_idle_screen()
 
     def _ensure_group_services(self, group_ifname: str) -> None:
         """Everything a live GO needs beyond what wpa_supplicant provides:
@@ -216,7 +217,10 @@ class CastDaemon:
         # PNG and restarts the render pipeline every time a peer requests
         # one, so whatever is on screen is always the PIN that will
         # actually work right now.
-        render_idle_screen(IDLE_PNG_PATH, room_name=self.config.room_name, pin=pin)
+        ssid, password = self._wifi_credentials or (None, None)
+        render_idle_screen(
+            IDLE_PNG_PATH, room_name=self.config.room_name, pin=pin, wifi_ssid=ssid, wifi_password=password
+        )
         if self.render.is_running:
             self.render.stop()
         self.render.start(build_idle_screen_pipeline(png_path=IDLE_PNG_PATH, target=self.render_target))

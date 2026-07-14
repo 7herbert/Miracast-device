@@ -57,12 +57,17 @@ def render_idle_screen(
     *,
     room_name: str,
     pin: str | None = None,
+    wifi_ssid: str | None = None,
+    wifi_password: str | None = None,
     width: int = WIDTH,
     height: int = HEIGHT,
 ) -> None:
     """Render the kiosk idle screen PNG. Called with pin=None at startup
     (before any connection attempt exists) and again with a real,
-    freshly-generated PIN every time wpa_supplicant asks to display one."""
+    freshly-generated PIN every time wpa_supplicant asks to display one.
+    wifi_ssid/wifi_password are the P2P group's own network -- an iPhone
+    that joins it can AirPlay to this receiver, so they stay visible in a
+    footer on every variant of the screen."""
     img = Image.new("RGB", (width, height), color=BACKGROUND)
     draw = ImageDraw.Draw(img)
 
@@ -70,6 +75,7 @@ def render_idle_screen(
     hint_font = _load_font(56)
     pin_label_font = _load_font(64)
     pin_font = _load_font(200)
+    footer_font = _load_font(48)
 
     _draw_centered(draw, room_name, room_font, width, height * 0.20, FOREGROUND)
 
@@ -79,6 +85,14 @@ def render_idle_screen(
         _draw_centered(draw, spaced_pin, pin_font, width, height * 0.56, FOREGROUND)
     else:
         _draw_centered(draw, "Press Win+K on your PC to connect", hint_font, width, height * 0.52, ACCENT)
+
+    if wifi_ssid and wifi_password:
+        _draw_centered(
+            draw, "iPhone / Mac: join this Wi-Fi, then AirPlay to this room", footer_font, width, height * 0.80, ACCENT
+        )
+        _draw_centered(
+            draw, f"Wi-Fi: {wifi_ssid}    Password: {wifi_password}", footer_font, width, height * 0.88, FOREGROUND
+        )
 
     Path(output_path).parent.mkdir(parents=True, exist_ok=True)
     img.save(output_path)

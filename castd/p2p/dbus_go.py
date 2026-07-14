@@ -114,6 +114,7 @@ class P2PGroupOwner:
         # castd restarts against an already-existing group (GroupStarted
         # never re-fires in that case). See _group_interface_object().
         self._group_iface_path: str | None = None
+        self._group_credentials: tuple[str, str] | None = None
         self._on_group_started = on_group_started
         self._on_wps_failed = on_wps_failed
         self._on_display_pin_needed = on_display_pin_needed
@@ -344,6 +345,40 @@ class P2PGroupOwner:
             )
         )
 
+    def _read_group_credentials(self, group_object_path: str) -> tuple[str, str] | None:
+        """The GO doubles as a plain WPA2 AP for non-P2P clients: an
+        iPhone that joins this SSID/passphrase reaches UxPlay's mDNS
+        advertisement and can AirPlay (there is no AWDL path to this
+        hardware). wpa_supplicant regenerates both on every group
+        (re)creation, so they must be read live, never cached across
+        groups."""
+        try:
+            group_obj = self.bus.get_object(WPAS_SERVICE, group_object_path)
+            group_props = dbus.Interface(group_obj, dbus_interface=dbus.PROPERTIES_IFACE)
+            ssid = bytes(group_props.Get(WPAS_SERVICE + ".Group", "SSID")).decode(errors="replace")
+            passphrase = str(group_props.Get(WPAS_SERVICE + ".Group", "Passphrase"))
+            logger.info("group Wi-Fi for legacy/AirPlay clients: SSID=%s passphrase=%s", ssid, passphrase)
+            return ssid, passphrase
+        except dbus.DBusException:
+            logger.exception("could not read group SSID/passphrase from %s", group_object_path)
+            return None
+
+    def get_group_credentials(self) -> tuple[str, str] | None:
+        """(SSID, WPA2 passphrase) of the running group. Captured from
+        GroupStarted on fresh creation; when castd restarts against an
+        already-existing group (GroupStarted never re-fires) it is
+        resolved via the group interface's P2PDevice.Group property."""
+        if self._group_credentials is not None:
+            return self._group_credentials
+        try:
+            props = dbus.Interface(self._group_interface_object(), dbus_interface=dbus.PROPERTIES_IFACE)
+            group_path = str(props.Get(IFACE_P2PDEVICE, "Group"))
+        except (dbus.DBusException, RuntimeError):
+            logger.exception("could not resolve the group object to read Wi-Fi credentials")
+            return None
+        self._group_credentials = self._read_group_credentials(group_path)
+        return self._group_credentials
+
     def _make_signal_logger(self, signal_name: str) -> Callable[..., None]:
         def handler(*args: object) -> None:
             logger.info("P2P signal %s: %s", signal_name, args)
@@ -372,20 +407,7 @@ class P2PGroupOwner:
         # to us for free instead of re-resolving it per attempt.
         self._group_iface_path = str(properties.get("interface_object", "")) or None
         logger.info("P2P group started: %s (interface object %s)", group_object_path, self._group_iface_path)
-        # The GO doubles as a plain AP for non-P2P clients: an iPhone that
-        # joins this SSID/passphrase reaches UxPlay's mDNS advertisement
-        # and can AirPlay (no AWDL involved -- iPhones can't AirPlay to us
-        # over the air otherwise). Logged so the credentials are testable
-        # by hand before the QR code makes it onto the idle screen; note
-        # wpa_supplicant regenerates both on every group (re)creation.
-        try:
-            group_obj = self.bus.get_object(WPAS_SERVICE, group_object_path)
-            group_props = dbus.Interface(group_obj, dbus_interface=dbus.PROPERTIES_IFACE)
-            ssid = bytes(group_props.Get(WPAS_SERVICE + ".Group", "SSID")).decode(errors="replace")
-            passphrase = str(group_props.Get(WPAS_SERVICE + ".Group", "Passphrase"))
-            logger.info("group Wi-Fi for legacy/AirPlay clients: SSID=%s passphrase=%s", ssid, passphrase)
-        except dbus.DBusException:
-            logger.exception("could not read group SSID/passphrase from %s", group_object_path)
+        self._group_credentials = self._read_group_credentials(group_object_path)
         info = GroupInfo(
             group_object_path=group_object_path,
             interface_name=self.interface_name,
