@@ -2,7 +2,7 @@
 Locks in the 2026-07-14 real-hardware lesson: uxplay(1) has no -bindif
 option, and an unknown flag makes it exit immediately with a usage error
 that piped-and-unread output rendered invisible."""
-from castd.airplay.uxplay import UxPlayConfig, build_uxplay_argv
+from castd.airplay.uxplay import UxPlayClientTracker, UxPlayConfig, build_uxplay_argv
 
 
 def test_argv_uses_only_documented_uxplay_options():
@@ -22,3 +22,37 @@ def test_argv_renders_via_kms_and_alsa():
     argv = build_uxplay_argv(UxPlayConfig(device_name="X"))
     assert argv[argv.index("-vs") + 1] == "kmssink"
     assert argv[argv.index("-as") + 1] == "alsasink"
+
+
+def test_tracker_reports_first_accept_as_connected():
+    t = UxPlayClientTracker()
+    assert t.feed("Accepted IPv4 client on socket 12") == "connected"
+    # additional connections within the same session stay silent
+    assert t.feed("Accepted IPv4 client on socket 13") is None
+
+
+def test_tracker_reports_disconnect_only_when_all_connections_close():
+    t = UxPlayClientTracker()
+    t.feed("Accepted IPv4 client on socket 12")
+    t.feed("Accepted IPv4 client on socket 13")
+    assert t.feed("Connection closed for socket 12") is None
+    assert t.feed("Connection closed for socket 13") == "disconnected"
+
+
+def test_tracker_server_stop_flushes_active_session():
+    t = UxPlayClientTracker()
+    t.feed("Accepted IPv4 client on socket 12")
+    assert t.feed("Stopping RAOP Server...") == "disconnected"
+
+
+def test_tracker_server_stop_without_clients_is_silent():
+    # castd itself stops uxplay whenever a Miracast session starts; that
+    # must not produce a phantom AirPlay-disconnect event.
+    t = UxPlayClientTracker()
+    assert t.feed("Stopping RAOP Server...") is None
+
+
+def test_tracker_ignores_unrelated_lines():
+    t = UxPlayClientTracker()
+    assert t.feed("UxPlay 1.74: An Open-Source AirPlay mirroring and audio-streaming server.") is None
+    assert t.feed("Initialized server socket(s)") is None

@@ -31,7 +31,7 @@ class FakeRenderProcess:
 
 
 class FakeUxPlayProcess:
-    def __init__(self, config=None) -> None:
+    def __init__(self, config=None, **kwargs) -> None:
         self.calls: list[str] = []
 
     def start(self) -> None:
@@ -193,3 +193,37 @@ def test_station_authorized_gives_up_cleanly_without_a_lease(monkeypatch):
     daemon._connect_to_authorized_source("12:5f:ad:5c:f4:13", lease_timeout_s=0)
 
     assert daemon.arbiter.state is State.IDLE
+
+
+def test_legacy_station_without_rtsp_service_stays_idle(monkeypatch):
+    # An iPhone joining the group's Wi-Fi for AirPlay triggers the same
+    # StaAuthorized path as a Miracast source but runs no RTSP server --
+    # the probe must fail quietly and leave the FSM alone.
+    daemon = make_daemon(monkeypatch)
+    monkeypatch.setattr(main_module, "find_lease_ip", lambda mac, *a, **k: "192.168.173.123")
+
+    def refused(source_ip, **k):
+        raise ConnectionRefusedError(111, "Connection refused")
+
+    monkeypatch.setattr(main_module, "open_control_connection", refused)
+
+    daemon._connect_to_authorized_source("7e:b3:6f:08:3b:2a")
+
+    assert daemon.arbiter.state is State.IDLE
+
+
+def test_airplay_connect_releases_display_and_disconnect_reclaims_it(monkeypatch):
+    # The DRM handoff: UxPlay's own kmssink cannot become DRM master while
+    # the idle screen holds it -- a real iPhone got "cannot connect"
+    # (2026-07-14). AIRPLAY_CONNECTED must stop our render pipeline.
+    daemon = make_daemon(monkeypatch)
+    daemon.render.start("idle")
+    assert daemon.render.is_running
+
+    daemon._on_airplay_connected()
+    assert daemon.arbiter.state is State.AIRPLAY
+    assert not daemon.render.is_running  # DRM released for UxPlay
+
+    daemon._on_airplay_disconnected()
+    assert daemon.arbiter.state is State.IDLE
+    assert daemon.render.is_running  # idle screen back on

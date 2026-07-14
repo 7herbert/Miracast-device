@@ -94,5 +94,12 @@ def render_idle_screen(
             draw, f"Wi-Fi: {wifi_ssid}    Password: {wifi_password}", footer_font, width, height * 0.88, FOREGROUND
         )
 
-    Path(output_path).parent.mkdir(parents=True, exist_ok=True)
-    img.save(output_path)
+    # Atomic replace: a plain save() truncates the file in place, and the
+    # still-running idle pipeline's filesrc can catch it mid-write --
+    # observed live (2026-07-14) as gst dying with "Can't typefind empty
+    # stream" during the startup re-render.
+    out = Path(output_path)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    tmp = out.with_suffix(".tmp")
+    img.save(tmp, format="PNG")
+    tmp.replace(out)

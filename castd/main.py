@@ -96,7 +96,11 @@ class CastDaemon:
         self._ensure_group_services(group_ifname)
         self._wifi_credentials = self.p2p.get_group_credentials()
         self._show_idle_screen()  # re-render now that the Wi-Fi footer is known
-        self.uxplay = UxPlayProcess(UxPlayConfig(device_name=self.config.device_name))
+        self.uxplay = UxPlayProcess(
+            UxPlayConfig(device_name=self.config.device_name),
+            on_client_connected=self._on_airplay_connected,
+            on_client_disconnected=self._on_airplay_disconnected,
+        )
 
         dbus_thread = threading.Thread(target=self.p2p.run_forever, daemon=True)
         dbus_thread.start()
@@ -144,6 +148,22 @@ class CastDaemon:
             threading.Thread(target=self._accept_sources_loop, daemon=True).start()
             logger.info("RTSP sink listening on %s:7236", SINK_IP)
 
+    def _on_airplay_connected(self) -> None:
+        # Runs on UxPlayProcess's output-pump thread. The critical action
+        # is STOP_RENDER_PIPELINE: releasing DRM master so UxPlay's own
+        # kmssink can take the display -- without it a real iPhone got
+        # "cannot connect" (2026-07-14).
+        logger.info("AirPlay client connected; handing the display to UxPlay")
+        with self._lock:
+            transition = self.arbiter.handle(Event.AIRPLAY_CONNECTED)
+        self._apply_actions(transition.actions)
+
+    def _on_airplay_disconnected(self) -> None:
+        logger.info("AirPlay client disconnected; reclaiming the display")
+        with self._lock:
+            transition = self.arbiter.handle(Event.AIRPLAY_DISCONNECTED)
+        self._apply_actions(transition.actions)
+
     def _on_station_authorized(self, mac: str) -> None:
         # Runs on the GLib signal thread; hand off immediately.
         threading.Thread(target=self._connect_to_authorized_source, args=(mac,), daemon=True).start()
@@ -167,11 +187,19 @@ class CastDaemon:
         if not source_ip:
             logger.warning("no DHCP lease for %s within %.0fs; cannot start RTSP", mac, lease_timeout_s)
             return
-        logger.info("source %s leased %s; dialing RTSP control connection", mac, source_ip)
+        logger.info("station %s leased %s; probing for a Miracast RTSP server", mac, source_ip)
         try:
             sock = open_control_connection(source_ip)
-        except OSError:
-            logger.exception("could not open RTSP control connection to %s:7236", source_ip)
+        except OSError as exc:
+            # Not an error: every station that joins the group's Wi-Fi
+            # lands here, and legacy clients (an iPhone joining for
+            # AirPlay, a laptop joining by hand) run no RTSP server. A
+            # real 2026-07-14 iPhone join was logged as a scary traceback
+            # by an earlier revision of this path.
+            logger.info(
+                "no RTSP service at %s:7236 (%s); treating %s as a legacy/AirPlay client, not a Miracast source",
+                source_ip, exc, mac,
+            )
             return
         self._run_source_session(source_ip, sock)
 

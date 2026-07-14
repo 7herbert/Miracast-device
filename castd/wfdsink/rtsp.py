@@ -30,8 +30,11 @@ it is correct per spec and is exactly what d2.py implements.
 """
 from __future__ import annotations
 
+import logging
 import re
 from dataclasses import dataclass
+
+logger = logging.getLogger(__name__)
 
 _CSEQ_RE = re.compile(r"CSeq:\s*(\d+)", re.IGNORECASE)
 _SERVER_PORT_RE = re.compile(r"server_port=(\d+)(?:-(\d+))?")
@@ -178,6 +181,13 @@ class WfdNegotiator:
             raise NegotiationError(f"M4 received in unexpected state {self.state}")
         cseq = _extract_cseq(request)
         self._parse_uibc_port(request)
+        # The M4 body is where the source commits to a concrete video mode
+        # and audio codec out of everything we offered in M3 -- log the
+        # choices, because "why is extend mode not full screen" style
+        # questions are unanswerable without them (2026-07-14).
+        for line in request.splitlines():
+            if line.startswith(("wfd_video_formats", "wfd_audio_codecs")):
+                logger.info("source selected %s", line.strip())
         self.state = STATE_WAIT_M5
         return f"RTSP/1.0 200 OK\r\nCSeq: {cseq}\r\n\r\n"
 
