@@ -84,22 +84,29 @@ and fail to connect. Restrict mDNS to the P2P side:
 
 ```bash
 # /etc/avahi/avahi-daemon.conf:
-#   use-ipv6=no              (transport)
-#   deny-interfaces=eth0,wlan0
-#   publish-aaaa-on-ipv4=no  (record content -- see below)
+#   use-ipv6=no                      (transport)
+#   allow-interfaces=p2p-wlan1-0     (whitelist beats deny -- see below)
+#   publish-aaaa-on-ipv4=no          (record content -- see below)
 sudo sed -i -e 's/^#\?use-ipv6=.*/use-ipv6=no/' \
-            -e 's/^#\?deny-interfaces=.*/deny-interfaces=eth0,wlan0/' \
+            -e 's/^#\?allow-interfaces=.*/allow-interfaces=p2p-wlan1-0/' \
             -e 's/^#\?publish-aaaa-on-ipv4=.*/publish-aaaa-on-ipv4=no/' \
             /etc/avahi/avahi-daemon.conf
 sudo systemctl restart avahi-daemon
 ```
 
-`publish-aaaa-on-ipv4=no` is the non-obvious one: `use-ipv6=no` only
-disables IPv6 *transport*, while avahi keeps advertising the AAAA
-record inside IPv4 mDNS responses. A real iPhone (2026-07-14) preferred
-that IPv6 link-local address and dialed AirPlay port 7000 on it -- where
-UxPlay's IPv4-only sockets answered with TCP RST, surfacing as "cannot
-connect" despite everything else working.
+Both non-defaults were found with a packet capture against a real iPhone
+(2026-07-14):
+- `publish-aaaa-on-ipv4=no`: `use-ipv6=no` only disables IPv6
+  *transport*; avahi kept advertising the AAAA record inside IPv4 mDNS
+  responses, the iPhone preferred that IPv6 link-local address, and
+  UxPlay's IPv4-only sockets answered its AirPlay connection with RST.
+- `allow-interfaces` (not `deny-interfaces`): with only a deny list,
+  avahi's SRV/A answers on the P2P interface still carried the Pi's
+  *infrastructure-side* address, which is unreachable from the P2P
+  subnet -- the iPhone dialed it and timed out. Whitelisting the group
+  interface leaves avahi knowing exactly one address, the right one.
+  (If wpa_supplicant ever creates the group as p2p-wlan1-1 instead of
+  -0, this line must follow.)
 
 Room settings live in `/boot/receiver.conf` (see `castd/config.py` for the
 format; the WPS PIN there must pass the WSC checksum, which config parsing
