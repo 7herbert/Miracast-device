@@ -48,7 +48,17 @@ def build_wfd_pipeline_description(*, udp_port: int, target: RenderTarget) -> st
         stopped, reason not-negotiated (-4)": the decoder outputs YUV and
         the DRM plane kmssink picks need not accept it. v4l2convert is the
         Pi's hardware ISP path (zero CPU), the canonical Pi 4 bridge for
-        exactly this pairing."""
+        exactly this pairing.
+      * capssetter rewriting profile to "high" -- the Windows 11 source
+        streams H.264 constrained-high (captured caps: profile=(string)
+        constrained-high, level=4.2), but the bcm2835 V4L2 decoder's
+        profile menu only lists baseline/constrained-baseline/main/high,
+        so GStreamer's caps intersection with the parsed stream is EMPTY
+        and the decoder sink refuses the caps -- the second face of the
+        same not-negotiated error. Constrained-high is a strict subset
+        of high, so decoding it as high is lossless and safe; capssetter
+        (accept-anything sink template) breaks the doomed intersection
+        and hands the decoder a profile string its driver does list."""
     connector = f" connector-id={target.connector_id}" if target.connector_id is not None else ""
     return (
         f"udpsrc port={udp_port} "
@@ -56,7 +66,9 @@ def build_wfd_pipeline_description(*, udp_port: int, target: RenderTarget) -> st
         f"! rtpjitterbuffer latency=200 "
         f"! rtpmp2tdepay "
         f"! tsdemux name=demux "
-        f"demux. ! queue ! h264parse ! v4l2h264dec ! v4l2convert "
+        f"demux. ! queue ! h264parse "
+        f"! capssetter join=true replace=false caps=video/x-h264,profile=(string)high "
+        f"! v4l2h264dec ! v4l2convert "
         f"! kmssink driver-name={target.driver_name}{connector} sync=false "
         f"demux. ! queue ! aacparse ! avdec_aac ! audioconvert ! audioresample ! alsasink"
     )

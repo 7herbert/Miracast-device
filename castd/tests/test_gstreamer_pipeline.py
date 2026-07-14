@@ -40,6 +40,17 @@ def test_wfd_pipeline_bridges_decoder_to_kms_via_hardware_convert():
     assert "v4l2h264dec ! v4l2convert ! kmssink" in desc
 
 
+def test_wfd_pipeline_rewrites_constrained_high_profile_for_the_decoder():
+    # Real-hardware failure (2026-07-14): Windows streams H.264
+    # constrained-high, which the bcm2835 V4L2 decoder's profile menu
+    # does not list (baseline/constrained-baseline/main/high only), so
+    # the caps intersection is empty and the decoder refuses the stream.
+    # capssetter overrides the profile field to "high" (a strict
+    # superset, lossless to decode as) before the decoder sees it.
+    desc = build_wfd_pipeline_description(udp_port=1028, target=RenderTarget())
+    assert "h264parse ! capssetter join=true replace=false caps=video/x-h264,profile=(string)high ! v4l2h264dec" in desc
+
+
 def test_wfd_pipeline_audio_branch_can_resample_for_alsa():
     desc = build_wfd_pipeline_description(udp_port=1028, target=RenderTarget())
     assert "audioconvert ! audioresample ! alsasink" in desc

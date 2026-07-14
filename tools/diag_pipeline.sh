@@ -57,7 +57,9 @@ run_stage front \
 # branch is the killer.
 run_stage video \
     udpsrc port=1028 ! "$CAPS" ! rtpjitterbuffer latency=200 ! rtpmp2tdepay \
-    ! tsdemux ! queue ! h264parse ! v4l2h264dec ! v4l2convert \
+    ! tsdemux ! queue ! h264parse \
+    ! capssetter join=true replace=false caps="video/x-h264,profile=(string)high" \
+    ! v4l2h264dec ! v4l2convert \
     ! kmssink driver-name=vc4 sync=false
 
 # Stage 2b: the hardware decoder ALONE, output discarded. First bisection
@@ -80,7 +82,9 @@ run_stage swvideo \
 run_stage full \
     udpsrc port=1028 ! "$CAPS" ! rtpjitterbuffer latency=200 ! rtpmp2tdepay \
     ! tsdemux name=demux \
-    demux. ! queue ! h264parse ! v4l2h264dec ! v4l2convert \
+    demux. ! queue ! h264parse \
+    ! capssetter join=true replace=false caps="video/x-h264,profile=(string)high" \
+    ! v4l2h264dec ! v4l2convert \
     ! kmssink driver-name=vc4 sync=false \
     demux. ! queue ! aacparse ! avdec_aac ! audioconvert ! audioresample ! alsasink
 
