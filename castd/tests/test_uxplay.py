@@ -7,9 +7,17 @@ from castd.airplay.uxplay import UxPlayClientTracker, UxPlayConfig, build_uxplay
 
 def test_argv_uses_only_documented_uxplay_options():
     argv = build_uxplay_argv(UxPlayConfig(device_name="MR-3F-A"))
-    assert argv[0] == "uxplay"
+    assert "uxplay" in argv
     assert "-bindif" not in argv  # does not exist in uxplay(1); fatal at launch
     assert "-pin" not in argv  # WPS PINs are not UxPlay pins; the Wi-Fi is the gate
+
+
+def test_argv_forces_line_buffered_output():
+    # Block-buffered pipe output delayed uxplay's log lines until process
+    # exit (observed 2026-07-14), making real-time client detection -- and
+    # therefore the DRM handoff -- impossible.
+    argv = build_uxplay_argv(UxPlayConfig(device_name="MR-3F-A"))
+    assert argv[:3] == ["stdbuf", "-oL", "-eL"]
 
 
 def test_argv_advertises_the_room_name_verbatim():

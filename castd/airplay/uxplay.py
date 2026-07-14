@@ -71,7 +71,15 @@ class UxPlayConfig:
 
 
 def build_uxplay_argv(config: UxPlayConfig) -> list[str]:
+    # stdbuf -oL is load-bearing, not cosmetic: with stdout going to a
+    # pipe, uxplay's stdio switches to block buffering and its log lines
+    # sit unflushed inside uxplay until the process EXITS -- observed
+    # live (2026-07-14) as the whole startup banner appearing in our
+    # journal 14 seconds late, all at once, at shutdown. Client-connect
+    # detection (and therefore the DRM handoff) only works if lines
+    # arrive as they are printed.
     return [
+        "stdbuf", "-oL", "-eL",
         "uxplay",
         "-n", config.device_name,
         "-nh",  # advertise exactly the room name, not "name@hostname"
