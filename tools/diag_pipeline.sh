@@ -42,7 +42,7 @@ run_stage() {
     echo "--- errors/warnings ---"
     grep -E "ERROR|Internal data|not-negotiated|could not link|no element|WARN" "$LOGDIR/$name.log" | head -8
     echo "--- last negotiated caps ---"
-    grep -E "caps = " "$LOGDIR/$name.log" | tail -6
+    grep -E "caps = " "$LOGDIR/$name.log" | tail -12
     echo
 }
 
@@ -58,6 +58,22 @@ run_stage front \
 run_stage video \
     udpsrc port=1028 ! "$CAPS" ! rtpjitterbuffer latency=200 ! rtpmp2tdepay \
     ! tsdemux ! queue ! h264parse ! v4l2h264dec ! v4l2convert \
+    ! kmssink driver-name=vc4 sync=false
+
+# Stage 2b: the hardware decoder ALONE, output discarded. First bisection
+# run showed h264parse negotiated fine (1024x768@60 high 4.2) and then
+# nothing -- this stage separates "the decoder itself fails" from "the
+# decoder-to-display link fails".
+run_stage decode \
+    udpsrc port=1028 ! "$CAPS" ! rtpjitterbuffer latency=200 ! rtpmp2tdepay \
+    ! tsdemux ! queue ! h264parse ! v4l2h264dec ! fakesink
+
+# Stage 2c: SOFTWARE decode all the way to the display. If the TV shows
+# the Windows desktop here, the kmssink display path is fine and the
+# hardware decoder (or its output negotiation) is the sole problem.
+run_stage swvideo \
+    udpsrc port=1028 ! "$CAPS" ! rtpjitterbuffer latency=200 ! rtpmp2tdepay \
+    ! tsdemux ! queue ! h264parse ! avdec_h264 ! videoconvert \
     ! kmssink driver-name=vc4 sync=false
 
 # Stage 3: the exact pipeline castd runs, audio branch included.
