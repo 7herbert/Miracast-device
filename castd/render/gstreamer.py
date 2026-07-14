@@ -31,6 +31,11 @@ logger = logging.getLogger(__name__)
 class RenderTarget:
     driver_name: str = "vc4"  # the Raspberry Pi 4's DRM/KMS driver
     connector_id: int | None = None  # None = let kmssink auto-pick the connected output
+    # Output size the stream is hardware-scaled to (v4l2convert / ISP).
+    # Forcing this means any negotiated source resolution fills the
+    # display instead of sitting small in a corner of the DRM plane.
+    width: int = 1920
+    height: int = 1080
 
 
 def build_wfd_pipeline_description(*, udp_port: int, target: RenderTarget) -> str:
@@ -60,15 +65,20 @@ def build_wfd_pipeline_description(*, udp_port: int, target: RenderTarget) -> st
         (accept-anything sink template) breaks the doomed intersection
         and hands the decoder a profile string its driver does list."""
     connector = f" connector-id={target.connector_id}" if target.connector_id is not None else ""
+    # latency=50 + drop-on-latency: this is a one-hop P2P link a few
+    # meters long, not the internet -- 200 ms of jitter buffer (the first
+    # value tried) reads as visible lag on a mirrored mouse cursor.
+    # Stale packets get dropped instead of played late.
     return (
         f"udpsrc port={udp_port} "
         f"! application/x-rtp,media=video,encoding-name=MP2T,payload=33,clock-rate=90000 "
-        f"! rtpjitterbuffer latency=200 "
+        f"! rtpjitterbuffer latency=50 drop-on-latency=true "
         f"! rtpmp2tdepay "
         f"! tsdemux name=demux "
         f"demux. ! queue ! h264parse "
         f"! capssetter join=true replace=false caps=video/x-h264,profile=(string)high "
         f"! v4l2h264dec ! v4l2convert "
+        f"! video/x-raw,width={target.width},height={target.height} "
         f"! kmssink driver-name={target.driver_name}{connector} sync=false "
         f"demux. ! queue ! aacparse ! avdec_aac ! audioconvert ! audioresample ! alsasink"
     )

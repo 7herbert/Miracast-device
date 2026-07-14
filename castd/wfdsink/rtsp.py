@@ -126,10 +126,17 @@ class WfdNegotiator:
     def _build_capability_body(self, m3_request: str) -> str:
         cap = self.capabilities
         video_fmt_mask = "0001FFFF" if cap.allow_1080p60 else "0001FEFF"
+        # Native-resolution byte: (index into CEA table << 3) | table-id 0.
+        # 0x40 = CEA index 8 = 1920x1080p60; 0x00 = CEA index 0 = 640x480.
+        # Real Windows 11 treats this as the sink's preferred resolution:
+        # with 00 it streamed 1024x768 to a 1080p TV (observed 2026-07-14),
+        # which then got upscaled to mush. Advertise what the display
+        # actually is.
+        native = "40" if cap.allow_1080p60 else "00"
         lines = [
             f"wfd_client_rtp_ports: RTP/AVP/UDP;unicast {self.session.sink_rtp_port} 0 mode=play",
             f"wfd_audio_codecs: {'LPCM 00000002 00' if cap.audio_codec == 'LPCM' else 'AAC 00000001 00'}",
-            f"wfd_video_formats: 00 00 02 10 {video_fmt_mask} 3FFFFFFF 00000FFF 00 0000 0000 00 none none",
+            f"wfd_video_formats: {native} 00 02 10 {video_fmt_mask} 3FFFFFFF 00000FFF 00 0000 0000 00 none none",
             "wfd_3d_video_formats: none",
             "wfd_coupled_sink: none",
             "wfd_connector_type: 05",

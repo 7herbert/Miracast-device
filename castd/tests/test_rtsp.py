@@ -56,6 +56,24 @@ def test_m3_reports_content_length_matching_actual_body():
     assert declared_length == len(body)
 
 
+def test_m3_advertises_1080p60_native_resolution_when_allowed():
+    # Native byte 0x40 = CEA table index 8 = 1920x1080p60; mask 0001FFFF
+    # includes the 1080p60 bit. With native left at 00 (CEA index 0 =
+    # 640x480) a real Windows 11 source streamed 1024x768 to a 1080p TV
+    # (observed 2026-07-14).
+    neg = make_negotiator(allow_1080p60=True)
+    neg.handle_m1_options("OPTIONS * RTSP/1.0\r\nCSeq: 1\r\n\r\n")
+    response = neg.handle_m3_get_parameter("GET_PARAMETER * RTSP/1.0\r\nCSeq: 2\r\n\r\n")
+    assert "wfd_video_formats: 40 00 02 10 0001FFFF" in response
+
+
+def test_m3_native_resolution_falls_back_without_1080p60():
+    neg = make_negotiator()
+    neg.handle_m1_options("OPTIONS * RTSP/1.0\r\nCSeq: 1\r\n\r\n")
+    response = neg.handle_m3_get_parameter("GET_PARAMETER * RTSP/1.0\r\nCSeq: 2\r\n\r\n")
+    assert "wfd_video_formats: 00 00 02 10 0001FEFF" in response
+
+
 def test_m3_includes_intel_fields_only_when_requested():
     neg = make_negotiator(device_name="MR-3F-A")
     neg.handle_m1_options("OPTIONS * RTSP/1.0\r\nCSeq: 1\r\n\r\n")

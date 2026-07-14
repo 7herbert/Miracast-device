@@ -35,9 +35,17 @@ def test_wfd_pipeline_bridges_decoder_to_kms_via_hardware_convert():
     # Real-hardware failure (2026-07-14): with RTP flowing, direct
     # v4l2h264dec ! kmssink died "not-negotiated (-4)" -- the DRM plane
     # kmssink picks need not accept the decoder's YUV output. v4l2convert
-    # is the Pi's zero-CPU ISP bridge between them.
+    # is the Pi's zero-CPU ISP bridge between them, and scaling to the
+    # display size there means any source resolution fills the screen.
     desc = build_wfd_pipeline_description(udp_port=1028, target=RenderTarget())
-    assert "v4l2h264dec ! v4l2convert ! kmssink" in desc
+    assert "v4l2h264dec ! v4l2convert ! video/x-raw,width=1920,height=1080 ! kmssink" in desc
+
+
+def test_wfd_pipeline_uses_a_short_p2p_appropriate_jitter_buffer():
+    # One-hop P2P link: 200ms of jitter buffer read as visible mouse lag
+    # on real hardware; stale packets are dropped, not played late.
+    desc = build_wfd_pipeline_description(udp_port=1028, target=RenderTarget())
+    assert "rtpjitterbuffer latency=50 drop-on-latency=true" in desc
 
 
 def test_wfd_pipeline_rewrites_constrained_high_profile_for_the_decoder():

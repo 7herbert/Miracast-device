@@ -251,7 +251,11 @@ class CastDaemon:
         # WfdCapabilities value is LPCM, and advertising that while
         # decoding AAC means Windows ships LPCM PES packets the audio
         # branch can't parse, killing the whole pipeline mid-session.
-        negotiator = WfdNegotiator(WfdCapabilities(device_name=self.config.device_name, audio_codec="AAC"))
+        # allow_1080p60: the Pi 4 decoder is rated exactly H.264 L4.2 =
+        # 1080p60, and without it Windows picked 1024x768 for a 1080p TV.
+        negotiator = WfdNegotiator(
+            WfdCapabilities(device_name=self.config.device_name, audio_codec="AAC", allow_1080p60=True)
+        )
         try:
             # Bounded handshake: an un-timed-out recv() hanging the whole
             # session forever was d2.py's original bug (#15 in the project
