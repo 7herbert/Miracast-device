@@ -38,12 +38,17 @@ def build_wfd_pipeline_description(*, udp_port: int, target: RenderTarget) -> st
     stream arriving over RTP on `udp_port`. v4l2h264dec uses the Pi 4's
     hardware decoder; kmssink writes straight to the DRM plane.
 
-    clock-rate=90000 is mandatory in the udpsrc caps: RTP caps must be
-    fully fixed before the pipeline can preroll, and on real hardware
-    (2026-07-14) omitting it killed the pipeline at start with "Filter
-    caps do not completely specify the output format / Output caps are
-    unfixed: ... clock-rate=(int)[ 1, 2147483647 ]". 90000 Hz is the
-    fixed RTP clock for MPEG-TS (RFC 3551, payload 33)."""
+    Two lessons this string encodes from real hardware (2026-07-14):
+      * clock-rate=90000 is mandatory in the udpsrc caps -- RTP caps must
+        be fully fixed before preroll, omitting it died with "Filter caps
+        do not completely specify the output format". 90000 Hz is the
+        fixed RTP clock for MPEG-TS (RFC 3551, payload 33).
+      * v4l2convert between the decoder and kmssink -- with RTP actually
+        flowing, direct v4l2h264dec ! kmssink died with "streaming
+        stopped, reason not-negotiated (-4)": the decoder outputs YUV and
+        the DRM plane kmssink picks need not accept it. v4l2convert is the
+        Pi's hardware ISP path (zero CPU), the canonical Pi 4 bridge for
+        exactly this pairing."""
     connector = f" connector-id={target.connector_id}" if target.connector_id is not None else ""
     return (
         f"udpsrc port={udp_port} "
@@ -51,8 +56,9 @@ def build_wfd_pipeline_description(*, udp_port: int, target: RenderTarget) -> st
         f"! rtpjitterbuffer latency=200 "
         f"! rtpmp2tdepay "
         f"! tsdemux name=demux "
-        f"demux. ! queue ! h264parse ! v4l2h264dec ! kmssink driver-name={target.driver_name}{connector} sync=false "
-        f"demux. ! queue ! aacparse ! avdec_aac ! audioconvert ! alsasink"
+        f"demux. ! queue ! h264parse ! v4l2h264dec ! v4l2convert "
+        f"! kmssink driver-name={target.driver_name}{connector} sync=false "
+        f"demux. ! queue ! aacparse ! avdec_aac ! audioconvert ! audioresample ! alsasink"
     )
 
 

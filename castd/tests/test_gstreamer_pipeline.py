@@ -31,6 +31,20 @@ def test_wfd_pipeline_uses_pi4_hardware_decode_and_kms():
     assert "kmssink driver-name=vc4" in desc
 
 
+def test_wfd_pipeline_bridges_decoder_to_kms_via_hardware_convert():
+    # Real-hardware failure (2026-07-14): with RTP flowing, direct
+    # v4l2h264dec ! kmssink died "not-negotiated (-4)" -- the DRM plane
+    # kmssink picks need not accept the decoder's YUV output. v4l2convert
+    # is the Pi's zero-CPU ISP bridge between them.
+    desc = build_wfd_pipeline_description(udp_port=1028, target=RenderTarget())
+    assert "v4l2h264dec ! v4l2convert ! kmssink" in desc
+
+
+def test_wfd_pipeline_audio_branch_can_resample_for_alsa():
+    desc = build_wfd_pipeline_description(udp_port=1028, target=RenderTarget())
+    assert "audioconvert ! audioresample ! alsasink" in desc
+
+
 def test_idle_pipeline_renders_png_to_kms():
     desc = build_idle_screen_pipeline(png_path="/opt/castd/idle_screen.png", target=RenderTarget())
     assert desc.startswith("filesrc location=/opt/castd/idle_screen.png")
