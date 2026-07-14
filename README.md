@@ -83,14 +83,23 @@ client on the P2P network can resolve the receiver to an unreachable IP
 and fail to connect. Restrict mDNS to the P2P side:
 
 ```bash
-# /etc/avahi/avahi-daemon.conf, [server] section:
-#   use-ipv6=no
+# /etc/avahi/avahi-daemon.conf:
+#   use-ipv6=no              (transport)
 #   deny-interfaces=eth0,wlan0
+#   publish-aaaa-on-ipv4=no  (record content -- see below)
 sudo sed -i -e 's/^#\?use-ipv6=.*/use-ipv6=no/' \
             -e 's/^#\?deny-interfaces=.*/deny-interfaces=eth0,wlan0/' \
+            -e 's/^#\?publish-aaaa-on-ipv4=.*/publish-aaaa-on-ipv4=no/' \
             /etc/avahi/avahi-daemon.conf
 sudo systemctl restart avahi-daemon
 ```
+
+`publish-aaaa-on-ipv4=no` is the non-obvious one: `use-ipv6=no` only
+disables IPv6 *transport*, while avahi keeps advertising the AAAA
+record inside IPv4 mDNS responses. A real iPhone (2026-07-14) preferred
+that IPv6 link-local address and dialed AirPlay port 7000 on it -- where
+UxPlay's IPv4-only sockets answered with TCP RST, surfacing as "cannot
+connect" despite everything else working.
 
 Room settings live in `/boot/receiver.conf` (see `castd/config.py` for the
 format; the WPS PIN there must pass the WSC checksum, which config parsing
