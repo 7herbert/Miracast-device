@@ -94,8 +94,16 @@ sudo sed -i -e 's/^#\?use-ipv6=.*/use-ipv6=no/' \
 sudo systemctl restart avahi-daemon
 ```
 
-Both non-defaults were found with a packet capture against a real iPhone
-(2026-07-14):
+UxPlay itself must be built with `cmake -DUSE_DNS_SD=1` (and
+`libavahi-compat-libdnssd-dev` installed): UxPlay 1.74's *default* is an
+internal mDNS responder that ignores avahi entirely and advertises the
+default-route interface's address -- on a multi-homed Pi that is the
+infrastructure address, unreachable from P2P clients. Only the
+`USE_DNS_SD` build routes registration through avahi, where the settings
+above take effect.
+
+The avahi non-defaults were found with a packet capture against a real
+iPhone (2026-07-14):
 - `publish-aaaa-on-ipv4=no`: `use-ipv6=no` only disables IPv6
   *transport*; avahi kept advertising the AAAA record inside IPv4 mDNS
   responses, the iPhone preferred that IPv6 link-local address, and
