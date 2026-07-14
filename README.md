@@ -77,6 +77,21 @@ sudo systemctl daemon-reload
 sudo systemctl enable --now castd
 ```
 
+If the Pi is also connected to an infrastructure network (Ethernet or
+wlan0 for SSH), avahi will advertise those addresses too, and an AirPlay
+client on the P2P network can resolve the receiver to an unreachable IP
+and fail to connect. Restrict mDNS to the P2P side:
+
+```bash
+# /etc/avahi/avahi-daemon.conf, [server] section:
+#   use-ipv6=no
+#   deny-interfaces=eth0,wlan0
+sudo sed -i -e 's/^#\?use-ipv6=.*/use-ipv6=no/' \
+            -e 's/^#\?deny-interfaces=.*/deny-interfaces=eth0,wlan0/' \
+            /etc/avahi/avahi-daemon.conf
+sudo systemctl restart avahi-daemon
+```
+
 Room settings live in `/boot/receiver.conf` (see `castd/config.py` for the
 format; the WPS PIN there must pass the WSC checksum, which config parsing
 enforces at startup). Raspberry Pi OS Bookworm also needs a wpa_supplicant
