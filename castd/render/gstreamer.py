@@ -78,7 +78,7 @@ def build_wfd_pipeline_description(*, udp_port: int, target: RenderTarget) -> st
         f"demux. ! queue ! h264parse "
         f"! capssetter join=true replace=false caps=video/x-h264,profile=(string)high "
         f"! v4l2h264dec ! v4l2convert "
-        f"! video/x-raw,width={target.width},height={target.height} "
+        f"! video/x-raw,width={target.width},height={target.height},pixel-aspect-ratio=1/1 "
         f"! kmssink driver-name={target.driver_name}{connector} sync=false "
         f"demux. ! queue ! aacparse ! avdec_aac ! audioconvert ! audioresample ! alsasink"
     )

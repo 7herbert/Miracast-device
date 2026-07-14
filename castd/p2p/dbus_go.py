@@ -372,6 +372,20 @@ class P2PGroupOwner:
         # to us for free instead of re-resolving it per attempt.
         self._group_iface_path = str(properties.get("interface_object", "")) or None
         logger.info("P2P group started: %s (interface object %s)", group_object_path, self._group_iface_path)
+        # The GO doubles as a plain AP for non-P2P clients: an iPhone that
+        # joins this SSID/passphrase reaches UxPlay's mDNS advertisement
+        # and can AirPlay (no AWDL involved -- iPhones can't AirPlay to us
+        # over the air otherwise). Logged so the credentials are testable
+        # by hand before the QR code makes it onto the idle screen; note
+        # wpa_supplicant regenerates both on every group (re)creation.
+        try:
+            group_obj = self.bus.get_object(WPAS_SERVICE, group_object_path)
+            group_props = dbus.Interface(group_obj, dbus_interface=dbus.PROPERTIES_IFACE)
+            ssid = bytes(group_props.Get(WPAS_SERVICE + ".Group", "SSID")).decode(errors="replace")
+            passphrase = str(group_props.Get(WPAS_SERVICE + ".Group", "Passphrase"))
+            logger.info("group Wi-Fi for legacy/AirPlay clients: SSID=%s passphrase=%s", ssid, passphrase)
+        except dbus.DBusException:
+            logger.exception("could not read group SSID/passphrase from %s", group_object_path)
         info = GroupInfo(
             group_object_path=group_object_path,
             interface_name=self.interface_name,

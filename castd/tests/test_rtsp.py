@@ -67,6 +67,17 @@ def test_m3_advertises_1080p60_native_resolution_when_allowed():
     assert "wfd_video_formats: 40 00 02 10 0001FFFF" in response
 
 
+def test_m3_advertises_only_16_9_cea_modes():
+    # VESA and HH mode masks must stay zero: with VESA open, a real
+    # Windows 11 source in extend mode picked a non-16:9 mode for the
+    # virtual display and the picture cropped at the panel edges
+    # (2026-07-14). Every CEA mode is 16:9.
+    neg = make_negotiator(allow_1080p60=True)
+    neg.handle_m1_options("OPTIONS * RTSP/1.0\r\nCSeq: 1\r\n\r\n")
+    response = neg.handle_m3_get_parameter("GET_PARAMETER * RTSP/1.0\r\nCSeq: 2\r\n\r\n")
+    assert "0001FFFF 00000000 00000000" in response
+
+
 def test_m3_native_resolution_falls_back_without_1080p60():
     neg = make_negotiator()
     neg.handle_m1_options("OPTIONS * RTSP/1.0\r\nCSeq: 1\r\n\r\n")

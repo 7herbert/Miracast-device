@@ -38,7 +38,10 @@ def test_wfd_pipeline_bridges_decoder_to_kms_via_hardware_convert():
     # is the Pi's zero-CPU ISP bridge between them, and scaling to the
     # display size there means any source resolution fills the screen.
     desc = build_wfd_pipeline_description(udp_port=1028, target=RenderTarget())
-    assert "v4l2h264dec ! v4l2convert ! video/x-raw,width=1920,height=1080 ! kmssink" in desc
+    # pixel-aspect-ratio pinned to 1/1: without it a non-16:9 source mode
+    # gets aspect-compensated during scaling and crops at the display
+    # edges instead of stretching uniformly.
+    assert "v4l2h264dec ! v4l2convert ! video/x-raw,width=1920,height=1080,pixel-aspect-ratio=1/1 ! kmssink" in desc
 
 
 def test_wfd_pipeline_uses_a_short_p2p_appropriate_jitter_buffer():
