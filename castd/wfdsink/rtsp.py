@@ -128,14 +128,24 @@ class WfdNegotiator:
 
     def _build_capability_body(self, m3_request: str) -> str:
         cap = self.capabilities
-        video_fmt_mask = "0001FFFF" if cap.allow_1080p60 else "0001FEFF"
         # Native-resolution byte: (index into CEA table << 3) | table-id 0.
-        # 0x40 = CEA index 8 = 1920x1080p60; 0x00 = CEA index 0 = 640x480.
         # Real Windows 11 treats this as the sink's preferred resolution:
-        # with 00 it streamed 1024x768 to a 1080p TV (observed 2026-07-14),
-        # which then got upscaled to mush. Advertise what the display
-        # actually is.
-        native = "40" if cap.allow_1080p60 else "00"
+        # with the original 00 (CEA index 0 = 640x480) it streamed
+        # 1024x768 to a 1080p TV (observed 2026-07-14), upscaled to mush.
+        #
+        # Default is 1080p30 (0x38, CEA index 7), NOT 1080p60: when this
+        # sink advertised p60 the source obliged and the Pi 4's
+        # v4l2h264dec/GStreamer path froze after the first frames -- a
+        # known weakness of that decoder path at 1080p60 -- while lighter
+        # 60 fps modes had played fine. The p30 mask (00019CFF) is every
+        # CEA mode up to 1080p30 plus 720p50/p60; no 1080p50/p60, no
+        # interlaced. 30 fps is ample for meeting-room screen sharing.
+        if cap.allow_1080p60:
+            native = "40"  # CEA index 8 = 1920x1080p60
+            video_fmt_mask = "0001FFFF"
+        else:
+            native = "38"  # CEA index 7 = 1920x1080p30
+            video_fmt_mask = "00019CFF"
         # VESA and HH mode masks deliberately zero: every CEA mode is 16:9
         # (matching the display), while the VESA table is full of 4:3 and
         # 16:10 modes. With VESA open (3FFFFFFF), a real Windows 11 source

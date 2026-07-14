@@ -78,11 +78,19 @@ def test_m3_advertises_only_16_9_cea_modes():
     assert "0001FFFF 00000000 00000000" in response
 
 
-def test_m3_native_resolution_falls_back_without_1080p60():
+def test_m3_default_is_1080p30_native_without_1080p50_60_modes():
+    # 1080p60 froze the Pi 4's v4l2 decode path after the first frames
+    # (2026-07-14); the default advertises 1080p30 native (0x38 = CEA
+    # index 7) and a mask with no 1080p50/p60/interlaced bits.
     neg = make_negotiator()
     neg.handle_m1_options("OPTIONS * RTSP/1.0\r\nCSeq: 1\r\n\r\n")
     response = neg.handle_m3_get_parameter("GET_PARAMETER * RTSP/1.0\r\nCSeq: 2\r\n\r\n")
-    assert "wfd_video_formats: 00 00 02 10 0001FEFF" in response
+    assert "wfd_video_formats: 38 00 02 10 00019CFF" in response
+    mask = 0x00019CFF
+    assert not mask & (1 << 8)  # 1080p60
+    assert not mask & (1 << 13)  # 1080p50
+    assert not mask & (1 << 9) and not mask & (1 << 14)  # interlaced 1080i
+    assert mask & (1 << 7)  # 1080p30 stays offered
 
 
 def test_m3_includes_intel_fields_only_when_requested():

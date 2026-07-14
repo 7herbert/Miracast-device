@@ -12,6 +12,14 @@ def test_argv_uses_only_documented_uxplay_options():
     assert "-pin" not in argv  # WPS PINs are not UxPlay pins; the Wi-Fi is the gate
 
 
+def test_argv_pins_fixed_ports_across_restarts():
+    # castd restarts uxplay around every Miracast session; random ports
+    # plus a client-side mDNS cache meant an iPhone dialed the previous
+    # instance's dead port (2026-07-14).
+    argv = build_uxplay_argv(UxPlayConfig(device_name="MR-3F-A"))
+    assert "-p" in argv
+
+
 def test_argv_forces_line_buffered_output():
     # Block-buffered pipe output delayed uxplay's log lines until process
     # exit (observed 2026-07-14), making real-time client detection -- and

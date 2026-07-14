@@ -42,7 +42,7 @@ from castd.render.gstreamer import RenderProcess, RenderTarget, build_idle_scree
 from castd.render.idle_screen import render_idle_screen
 from castd import sdnotify
 from castd.wfdsink.rtsp import NegotiationError, WfdCapabilities, WfdNegotiator
-from castd.wfdsink.session import listen_for_sources, negotiate, open_control_connection, run_steady_state
+from castd.wfdsink.session import RtspReader, listen_for_sources, negotiate, open_control_connection, run_steady_state
 
 logger = logging.getLogger("castd")
 
@@ -206,14 +206,17 @@ class CastDaemon:
     def _run_source_session(self, source_ip: str, sock) -> None:
         """One source's whole session lifetime, on the current thread:
         M1-M7 handshake, then pump the control channel until the source
-        leaves, then FSM back to IDLE."""
-        negotiator = self.handle_miracast_connected(source_ip, sock)
+        leaves, then FSM back to IDLE. One RtspReader owns the socket's
+        inbound side across both phases so a message coalesced over the
+        handshake/steady-state boundary is not lost."""
+        reader = RtspReader(sock)
+        negotiator = self.handle_miracast_connected(source_ip, sock, reader=reader)
         if negotiator is not None:
-            self._pump_control_channel(sock, negotiator)
+            self._pump_control_channel(sock, negotiator, reader=reader)
 
-    def _pump_control_channel(self, sock, negotiator: WfdNegotiator) -> None:
+    def _pump_control_channel(self, sock, negotiator: WfdNegotiator, reader: RtspReader | None = None) -> None:
         try:
-            run_steady_state(sock, negotiator)
+            run_steady_state(sock, negotiator, reader=reader)
         finally:
             try:
                 sock.close()
@@ -268,7 +271,7 @@ class CastDaemon:
             sdnotify.notify(watchdog=True, status=self.arbiter.state.name)
             time.sleep(interval_s)
 
-    def handle_miracast_connected(self, source_ip: str, sock) -> WfdNegotiator | None:
+    def handle_miracast_connected(self, source_ip: str, sock, reader: RtspReader | None = None) -> WfdNegotiator | None:
         """Run the WFD M1-M7 handshake over an RTSP control connection to
         the source. Returns the session's negotiator on success -- the
         caller MUST then keep pumping the control channel with it (see
@@ -283,11 +286,10 @@ class CastDaemon:
         # WfdCapabilities value is LPCM, and advertising that while
         # decoding AAC means Windows ships LPCM PES packets the audio
         # branch can't parse, killing the whole pipeline mid-session.
-        # allow_1080p60: the Pi 4 decoder is rated exactly H.264 L4.2 =
-        # 1080p60, and without it Windows picked 1024x768 for a 1080p TV.
-        negotiator = WfdNegotiator(
-            WfdCapabilities(device_name=self.config.device_name, audio_codec="AAC", allow_1080p60=True)
-        )
+        # Video capability defaults to 1080p30 native: 1080p60 froze the
+        # Pi 4 decode path after the first frames (2026-07-14) -- see
+        # rtsp.py's _build_capability_body for the full story.
+        negotiator = WfdNegotiator(WfdCapabilities(device_name=self.config.device_name, audio_codec="AAC"))
         try:
             # Bounded handshake: an un-timed-out recv() hanging the whole
             # session forever was d2.py's original bug (#15 in the project
@@ -296,7 +298,7 @@ class CastDaemon:
             if hasattr(sock, "settimeout"):
                 sock.settimeout(15.0)
             session = negotiate(
-                sock, source_ip=source_ip, capabilities=negotiator.capabilities, negotiator=negotiator
+                sock, source_ip=source_ip, capabilities=negotiator.capabilities, negotiator=negotiator, reader=reader
             )
             self.render.stop()
             self.render.start(build_wfd_pipeline_description(udp_port=WFD_UDP_PORT, target=self.render_target))

@@ -16,6 +16,7 @@ here as well.
 from __future__ import annotations
 
 import logging
+import re
 import socket
 import time
 from typing import Protocol
@@ -27,10 +28,49 @@ logger = logging.getLogger(__name__)
 RECV_BUFSIZE = 4096
 WFD_CONTROL_PORT = 7236
 
+_CONTENT_LENGTH_RE = re.compile(rb"Content-Length:\s*(\d+)", re.IGNORECASE)
+
 
 class SocketLike(Protocol):
     def recv(self, bufsize: int) -> bytes: ...
     def sendall(self, data: bytes) -> None: ...
+
+
+class RtspReader:
+    """Splits the TCP byte stream into individual RTSP messages (headers
+    up to the blank line, plus a body of exactly Content-Length bytes).
+
+    The naive one-recv-per-message pattern this replaces was a latent
+    protocol bug, not just test flakiness: TCP is free to deliver the
+    peer's back-to-back messages (its M2 response immediately followed by
+    its M3 request) coalesced into one segment, and the second message
+    silently disappeared into whatever recv() happened to read it. One
+    reader instance must own the socket's inbound side for the whole
+    session -- bytes it has buffered are invisible to raw recv() calls."""
+
+    def __init__(self, sock: SocketLike) -> None:
+        self._sock = sock
+        self._buf = b""
+
+    def next_message(self) -> str:
+        """Return the next complete RTSP message, or "" when the peer
+        closes the connection. Propagates the socket's own timeout."""
+        while True:
+            head_end = self._buf.find(b"\r\n\r\n")
+            if head_end != -1:
+                header = self._buf[: head_end + 4]
+                m = _CONTENT_LENGTH_RE.search(header)
+                total = head_end + 4 + (int(m.group(1)) if m else 0)
+                if len(self._buf) >= total:
+                    message = self._buf[:total]
+                    self._buf = self._buf[total:]
+                    return message.decode(errors="replace")
+            data = self._sock.recv(RECV_BUFSIZE)
+            if not data:
+                message = self._buf.decode(errors="replace")
+                self._buf = b""
+                return message
+            self._buf += data
 
 
 def negotiate(
@@ -40,6 +80,7 @@ def negotiate(
     capabilities: WfdCapabilities,
     sink_rtp_port: int = 1028,
     negotiator: WfdNegotiator | None = None,
+    reader: RtspReader | None = None,
 ) -> WfdSessionParams:
     """Run the full M1-M7 handshake over `sock`. Returns the negotiated
     session params on success. Raises NegotiationError (from rtsp.py) or
@@ -49,43 +90,47 @@ def negotiate(
 
     Pass `negotiator` to keep a handle on the session's state machine --
     required for run_steady_state below, which continues on the same
-    negotiator after M7."""
+    negotiator after M7. Pass `reader` (and reuse it for run_steady_state)
+    when calling both, so a message the peer coalesced across the
+    handshake/steady-state boundary is not lost."""
     if negotiator is None:
         negotiator = WfdNegotiator(capabilities, sink_rtp_port=sink_rtp_port)
+    if reader is None:
+        reader = RtspReader(sock)
 
-    request = sock.recv(RECV_BUFSIZE).decode()
+    request = reader.next_message()
     logger.debug("M1 <- %r", request)
     response = negotiator.handle_m1_options(request)
     sock.sendall(response.encode())
 
     m2_request = negotiator.build_m2_options_request()
     sock.sendall(m2_request.encode())
-    m2_response = sock.recv(RECV_BUFSIZE).decode()
+    m2_response = reader.next_message()
     logger.debug("M2 response -> %r", m2_response)
 
-    request = sock.recv(RECV_BUFSIZE).decode()
+    request = reader.next_message()
     logger.debug("M3 <- %r", request)
     response = negotiator.handle_m3_get_parameter(request)
     sock.sendall(response.encode())
 
-    request = sock.recv(RECV_BUFSIZE).decode()
+    request = reader.next_message()
     logger.debug("M4 <- %r", request)
     response = negotiator.handle_m4_set_parameter(request)
     sock.sendall(response.encode())
 
-    request = sock.recv(RECV_BUFSIZE).decode()
+    request = reader.next_message()
     logger.debug("M5 <- %r", request)
     response = negotiator.handle_m5_generic(request)
     sock.sendall(response.encode())
 
     m6_request = negotiator.build_m6_setup_request(source_ip)
     sock.sendall(m6_request.encode())
-    m6_response = sock.recv(RECV_BUFSIZE).decode()
+    m6_response = reader.next_message()
     session = negotiator.parse_m6_response(m6_response)
 
     m7_request = negotiator.build_m7_play_request(source_ip)
     sock.sendall(m7_request.encode())
-    m7_response = sock.recv(RECV_BUFSIZE).decode()
+    m7_response = reader.next_message()
     negotiator.confirm_streaming(m7_response)
 
     logger.info(
@@ -95,7 +140,13 @@ def negotiate(
     return session
 
 
-def run_steady_state(sock: SocketLike, negotiator: WfdNegotiator, *, keepalive_timeout: float = 60.0) -> None:
+def run_steady_state(
+    sock: SocketLike,
+    negotiator: WfdNegotiator,
+    *,
+    keepalive_timeout: float = 60.0,
+    reader: RtspReader | None = None,
+) -> None:
     """Pump the RTSP control connection for as long as the session lives:
     ack the source's periodic M16 GET_PARAMETER keep-alives (and any
     SET_PARAMETER), returning when the source ends the session -- explicit
@@ -107,19 +158,20 @@ def run_steady_state(sock: SocketLike, negotiator: WfdNegotiator, *, keepalive_t
     return and the socket fall out of scope: CPython closed it on GC,
     tcpdump showed our FIN 82 ms after the PLAY ack, and Windows tore the
     entire session down (StaDeauthorized) half a second later."""
+    if reader is None:
+        reader = RtspReader(sock)
     if hasattr(sock, "settimeout"):
         sock.settimeout(keepalive_timeout)
     try:
         while True:
             try:
-                data = sock.recv(RECV_BUFSIZE)
+                message = reader.next_message()
             except TimeoutError:
                 logger.warning("no RTSP traffic for %.0fs; treating session as dead", keepalive_timeout)
                 return
             except OSError:
                 logger.info("RTSP control connection error; session over")
                 return
-            message = data.decode(errors="replace")
             if message:
                 for ack in negotiator.build_steady_state_ack(message):
                     sock.sendall(ack.encode())

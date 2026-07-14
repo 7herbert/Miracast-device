@@ -83,6 +83,13 @@ def build_uxplay_argv(config: UxPlayConfig) -> list[str]:
         "uxplay",
         "-n", config.device_name,
         "-nh",  # advertise exactly the room name, not "name@hostname"
+        # Fixed legacy ports instead of the default random ones: castd
+        # restarts uxplay around every Miracast session, and with random
+        # ports an iPhone whose Screen Mirroring list cached the previous
+        # advertisement dials a now-closed port and reports it cannot
+        # connect (2026-07-14: taps produced zero uxplay log lines -- the
+        # TCP connection never reached the new instance's sockets).
+        "-p",
         "-vs", "kmssink",
         "-as", "alsasink",
     ]
