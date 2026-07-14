@@ -101,12 +101,14 @@ class P2PGroupOwner:
         on_group_started: Callable[[GroupInfo], None],
         on_wps_failed: Callable[[str], None],
         on_display_pin_needed: Callable[[str], None],
+        on_station_authorized: Callable[[str], None] | None = None,
         wpa_conf_path: str = DEFAULT_WPA_CONF_PATH,
     ) -> None:
         self.interface_name = interface_name
         self.device_name = device_name
         self.freq_mhz = freq_mhz
         self.wpa_conf_path = wpa_conf_path
+        self._on_station_authorized = on_station_authorized
         # D-Bus object path of the active group interface (p2p-wlan1-N),
         # captured from GroupStarted; resolved lazily via GetInterface when
         # castd restarts against an already-existing group (GroupStarted
@@ -199,16 +201,18 @@ class P2PGroupOwner:
             self.bus.add_signal_receiver(
                 self._make_signal_logger(f"WPS.{signal_name}"), dbus_interface=IFACE_WPS, signal_name=signal_name
             )
-        # AP-side association visibility: the group interface (GO = AP
-        # mode) emits these when a station is 802.11-associated and
-        # 802.1X/WPS-authorized. Live debugging on 2026-07-14 had to infer
-        # "did the source associate at all?" from the *absence* of WPS
-        # signals over a 67-second window -- one log line at the moment of
-        # association removes that guesswork for every future run.
-        for signal_name in ("StaAuthorized", "StaDeauthorized"):
-            self.bus.add_signal_receiver(
-                self._make_signal_logger(signal_name), dbus_interface=IFACE_INTERFACE, signal_name=signal_name
-            )
+        # AP-side association: the group interface (GO = AP mode) emits
+        # StaAuthorized when a station completes association + WPS/4-way
+        # handshake. This is the trigger for the whole Miracast session:
+        # the authorized station will DHCP within seconds and then WAIT for
+        # the sink to dial its advertised RTSP port (see main.py's
+        # _connect_to_authorized_source).
+        self.bus.add_signal_receiver(
+            self._handle_sta_authorized, dbus_interface=IFACE_INTERFACE, signal_name="StaAuthorized"
+        )
+        self.bus.add_signal_receiver(
+            self._make_signal_logger("StaDeauthorized"), dbus_interface=IFACE_INTERFACE, signal_name="StaDeauthorized"
+        )
 
     def configure(self) -> None:
         self.props_iface.Set(
@@ -378,6 +382,11 @@ class P2PGroupOwner:
         # generates a fresh one per attempt -- and wrong moment). The
         # per-attempt registrar arming lives in _handle_display_pin_request.
         self._on_group_started(info)
+
+    def _handle_sta_authorized(self, mac, *rest) -> None:
+        logger.info("station authorized on group interface: %s", mac)
+        if self._on_station_authorized is not None:
+            self._on_station_authorized(str(mac))
 
     def _handle_wps_failed(self, status, *rest) -> None:
         logger.warning("WPS authentication failed: status=%s extra=%s", status, rest)

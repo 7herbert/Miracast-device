@@ -29,19 +29,20 @@ from __future__ import annotations
 import logging
 import sys
 import threading
+import time
 from pathlib import Path
 
 from castd.airplay.uxplay import UxPlayConfig, UxPlayProcess
 from castd.config import ConfigError, RoomConfig, parse_room_config
-from castd.fsm.state_machine import Action, CastArbiter, Event
+from castd.fsm.state_machine import Action, CastArbiter, Event, State
 from castd.health import HealthState, serve_forever
 from castd.p2p.dbus_go import GroupInfo, P2PGroupOwner
-from castd.p2p.group_network import SINK_IP, GroupNetwork
+from castd.p2p.group_network import SINK_IP, GroupNetwork, find_lease_ip
 from castd.render.gstreamer import RenderProcess, RenderTarget, build_idle_screen_pipeline, build_wfd_pipeline_description
 from castd.render.idle_screen import render_idle_screen
 from castd import sdnotify
 from castd.wfdsink.rtsp import NegotiationError, WfdCapabilities
-from castd.wfdsink.session import listen_for_sources, negotiate
+from castd.wfdsink.session import listen_for_sources, negotiate, open_control_connection
 
 logger = logging.getLogger("castd")
 
@@ -79,6 +80,7 @@ class CastDaemon:
             on_group_started=self._on_group_started,
             on_wps_failed=self._on_wps_failed,
             on_display_pin_needed=self._on_display_pin_needed,
+            on_station_authorized=self._on_station_authorized,
         )
         self.p2p.configure()
         self.p2p.start_group()
@@ -140,6 +142,37 @@ class CastDaemon:
             self._rtsp_listener = listen_for_sources(SINK_IP)
             threading.Thread(target=self._accept_sources_loop, daemon=True).start()
             logger.info("RTSP sink listening on %s:7236", SINK_IP)
+
+    def _on_station_authorized(self, mac: str) -> None:
+        # Runs on the GLib signal thread; hand off immediately.
+        threading.Thread(target=self._connect_to_authorized_source, args=(mac,), daemon=True).start()
+
+    def _connect_to_authorized_source(self, mac: str, lease_timeout_s: float = 20.0) -> None:
+        """A station just completed WPS and associated (StaAuthorized). It
+        will DHCP within a couple of seconds, then LISTEN on its advertised
+        RTSP port waiting for us -- the sink dials the source, settled by
+        the 2026-07-14 capture (see session.open_control_connection). Poll
+        dnsmasq's lease file for its IP, dial, negotiate."""
+        if self.arbiter.state is State.MIRACAST:
+            logger.info("already in a Miracast session; ignoring StaAuthorized for %s", mac)
+            return
+        deadline = time.monotonic() + lease_timeout_s
+        source_ip = None
+        while time.monotonic() < deadline:
+            source_ip = find_lease_ip(mac)
+            if source_ip:
+                break
+            time.sleep(0.5)
+        if not source_ip:
+            logger.warning("no DHCP lease for %s within %.0fs; cannot start RTSP", mac, lease_timeout_s)
+            return
+        logger.info("source %s leased %s; dialing RTSP control connection", mac, source_ip)
+        try:
+            sock = open_control_connection(source_ip)
+        except OSError:
+            logger.exception("could not open RTSP control connection to %s:7236", source_ip)
+            return
+        self.handle_miracast_connected(source_ip, sock)
 
     def _accept_sources_loop(self) -> None:
         while True:

@@ -113,3 +113,36 @@ def test_health_state_reflects_arbiter_after_actions(monkeypatch):
 
     daemon.handle_miracast_connected("192.168.173.80", sock=object())
     assert daemon.health.snapshot()["state"] == "MIRACAST"
+
+
+def test_station_authorized_dials_source_from_its_lease(monkeypatch):
+    # The full post-WPS chain: StaAuthorized MAC -> lease lookup -> sink
+    # DIALS the source (never listens for it) -> handshake -> MIRACAST.
+    daemon = make_daemon(monkeypatch)
+    fake_session = WfdSessionParams(sink_rtp_port=1028, server_port=1, session_id="1")
+    dialed = []
+
+    monkeypatch.setattr(
+        main_module, "find_lease_ip", lambda mac, *a, **k: "192.168.173.93" if mac == "12:5f:ad:5c:f4:13" else None
+    )
+
+    def fake_dial(source_ip, **k):
+        dialed.append(source_ip)
+        return object()
+
+    monkeypatch.setattr(main_module, "open_control_connection", fake_dial)
+    monkeypatch.setattr(main_module, "negotiate", lambda sock, **k: fake_session)
+
+    daemon._connect_to_authorized_source("12:5f:ad:5c:f4:13")
+
+    assert dialed == ["192.168.173.93"]
+    assert daemon.arbiter.state is State.MIRACAST
+
+
+def test_station_authorized_gives_up_cleanly_without_a_lease(monkeypatch):
+    daemon = make_daemon(monkeypatch)
+    monkeypatch.setattr(main_module, "find_lease_ip", lambda mac, *a, **k: None)
+
+    daemon._connect_to_authorized_source("12:5f:ad:5c:f4:13", lease_timeout_s=0)
+
+    assert daemon.arbiter.state is State.IDLE

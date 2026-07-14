@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import logging
 import subprocess
+from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
@@ -51,7 +52,31 @@ def build_dnsmasq_command(interface_name: str) -> list[str]:
         "--bind-interfaces",  # port 67 on the group interface only
         f"--dhcp-range={DHCP_RANGE_START},{DHCP_RANGE_END},{DHCP_LEASE_TIME}",
         f"--dhcp-leasefile={LEASE_FILE}",
+        # Without this dnsmasq ICMP-probes each candidate address before
+        # offering it -- a real capture (2026-07-14) showed a Windows
+        # source broadcasting DHCPDISCOVER for 3 full seconds before the
+        # first OFFER went out. The /24 is exclusively this GO's; nothing
+        # can legitimately squat an address in it.
+        "--no-ping",
     ]
+
+
+def find_lease_ip(mac: str, lease_file: str = LEASE_FILE) -> str | None:
+    """Look up the IP dnsmasq leased to `mac`. Lease-file line format:
+    '<expiry-epoch> <mac> <ip> <hostname> <client-id>'. Returns None if
+    the file doesn't exist yet or holds no lease for that MAC -- callers
+    poll, because the station's DHCP exchange happens a beat after the
+    StaAuthorized signal that prompts the lookup."""
+    try:
+        text = Path(lease_file).read_text()
+    except OSError:
+        return None
+    wanted = mac.lower()
+    for line in text.splitlines():
+        fields = line.split()
+        if len(fields) >= 3 and fields[1].lower() == wanted:
+            return fields[2]
+    return None
 
 
 class GroupNetwork:

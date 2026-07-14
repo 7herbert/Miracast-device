@@ -15,6 +15,7 @@ from castd.p2p.group_network import (
     GroupNetwork,
     build_dnsmasq_command,
     build_ip_assign_command,
+    find_lease_ip,
 )
 
 
@@ -115,3 +116,30 @@ def test_stop_terminates_dnsmasq(fake_subprocess):
 def test_stop_without_start_is_a_noop(fake_subprocess):
     GroupNetwork().stop()
     assert fake_subprocess["popen"] == []
+
+
+# Real lease line shape from the 2026-07-14 capture: the Windows source's
+# P2P interface MAC and hostname exactly as dnsmasq recorded them.
+REAL_LEASE_LINE = "1784419513 12:5f:ad:5c:f4:13 192.168.173.93 DESKTOP-2NPNAR3 01:12:5f:ad:5c:f4:13\n"
+
+
+def test_find_lease_ip_returns_ip_for_known_mac(tmp_path):
+    lease_file = tmp_path / "leases"
+    lease_file.write_text(REAL_LEASE_LINE)
+    assert find_lease_ip("12:5f:ad:5c:f4:13", str(lease_file)) == "192.168.173.93"
+
+
+def test_find_lease_ip_matches_mac_case_insensitively(tmp_path):
+    lease_file = tmp_path / "leases"
+    lease_file.write_text(REAL_LEASE_LINE)
+    assert find_lease_ip("12:5F:AD:5C:F4:13", str(lease_file)) == "192.168.173.93"
+
+
+def test_find_lease_ip_returns_none_when_file_missing(tmp_path):
+    assert find_lease_ip("12:5f:ad:5c:f4:13", str(tmp_path / "nope")) is None
+
+
+def test_find_lease_ip_returns_none_for_unknown_mac(tmp_path):
+    lease_file = tmp_path / "leases"
+    lease_file.write_text(REAL_LEASE_LINE)
+    assert find_lease_ip("aa:bb:cc:dd:ee:ff", str(lease_file)) is None

@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import logging
 import socket
+import time
 from typing import Protocol
 
 from castd.wfdsink.rtsp import WfdCapabilities, WfdNegotiator, WfdSessionParams
@@ -82,17 +83,49 @@ def negotiate(sock: SocketLike, *, source_ip: str, capabilities: WfdCapabilities
     return session
 
 
-def listen_for_sources(bind_ip: str, *, port: int = WFD_CONTROL_PORT, backlog: int = 1) -> socket.socket:
-    """Create the sink-side RTSP listener socket.
+def open_control_connection(
+    source_ip: str,
+    *,
+    port: int = WFD_CONTROL_PORT,
+    attempts: int = 10,
+    retry_delay: float = 1.0,
+    timeout: float = 5.0,
+) -> socket.socket:
+    """Dial the SOURCE's RTSP control port. The connection direction was
+    settled empirically on 2026-07-14: a Windows 11 source that had
+    completed association, WPS, and DHCP never dialed our 7236 listener
+    (packet capture showed zero SYNs), while its own source WFD IE
+    advertised port 7236 -- "connect to ME here". The sink initiates the
+    TCP connection to source:7236 and the source then sends RTSP M1
+    (OPTIONS) over it; lazycast, which worked against real Windows, dialed
+    out the same way using the IP from the DHCP lease it had just issued.
 
-    Direction matters and an earlier revision had it backwards (an
-    open_control_connection() that dialed OUT to source:7236): per the WFD
-    spec it is the SOURCE that initiates the TCP connection, to the port
-    the sink advertises in its WFD Device Information subelement (7236 --
-    see p2p/wfd_ie.py's build_device_info_subelement, control_port field).
-    lazycast, this project's predecessor, listened for exactly this reason.
-    The caller accept()s connections and hands each one to negotiate();
-    the accepted peer address is how the sink learns the source's IP."""
+    Retries because the source's RTSP server may start listening a beat
+    after its DHCP exchange completes. `timeout` is never None during
+    connect on purpose -- d2.py's original bug (#15 in the project
+    retrospective) was an un-timed-out connect() hanging the process."""
+    last_exc: OSError = OSError("no connection attempts made")
+    for _ in range(attempts):
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.settimeout(timeout)
+        sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+        try:
+            sock.connect((source_ip, port))
+            sock.settimeout(None)
+            return sock
+        except OSError as exc:
+            last_exc = exc
+            sock.close()
+            time.sleep(retry_delay)
+    raise last_exc
+
+
+def listen_for_sources(bind_ip: str, *, port: int = WFD_CONTROL_PORT, backlog: int = 1) -> socket.socket:
+    """Sink-side listener on 7236. NOT the primary Miracast path -- see
+    open_control_connection above for the actual connection direction.
+    Kept as a diagnostic net (anything dialing us here gets logged and
+    handled) and as groundwork for MS-MICE, where the source genuinely
+    does dial the sink (on 7250)."""
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     sock.bind((bind_ip, port))
