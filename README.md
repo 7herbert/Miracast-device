@@ -5,16 +5,16 @@ Adapter: a Raspberry Pi 4B that acts as a single Wi-Fi Direct Group Owner
 serving both Miracast (Windows Win+K) and AirPlay (iPhone/Mac legacy-STA +
 QR join), for unattended use in commercial meeting rooms.
 
-## Status: hardware validation in progress
+## Status: both protocols working end-to-end on real hardware
 
-`castd/` is a from-scratch daemon (no lazycast dependency) with 110 passing
-unit/integration tests. Confirmed working on the real target hardware
-(Pi 4B + EDIMAX EW-7822UMX + Windows 11 source): P2P GO creation via D-Bus,
-Windows Win+K discovery, Provision Discovery with a live dynamically
-generated WPS PIN rendered on the HDMI kiosk screen, and kmssink rendering.
-Currently under live validation: WPS registrar authorization → association
-→ DHCP → RTSP handshake (the code path exists and is unit-tested; the
-end-to-end run against real Windows has not succeeded yet).
+`castd/` is a from-scratch daemon (no lazycast dependency) with 155 passing
+unit/integration tests. Verified live on the target hardware (Pi 4B +
+EDIMAX EW-7822UMX): **Windows 11 Miracast** (Win+K → dynamic WPS PIN on the
+kiosk screen → 1080p30 hardware-decoded mirroring, mirror + extend modes)
+and **iPhone AirPlay** (join the group Wi-Fi shown on the kiosk screen →
+Screen Mirroring), with first-connect-wins arbitration between the two.
+Remaining hardening: session watchdog/auto-recovery, audio validation, and
+the 72-hour soak test before multi-room deployment.
 
 ### Verified (pytest + static checks, runs on any machine with Python 3.12)
 
