@@ -129,9 +129,33 @@ the interface itself over D-Bus on first start, which also works.
 | Board | Raspberry Pi 4B (keeps the H.264 hardware decoder Pi 5 dropped) |
 | Wi-Fi adapter | Under evaluation — EDIMAX EW-7822UMX (RTL8832BU) is the current candidate; a 72-hour P2P GO soak test is required before committing to it for production rooms |
 
+## Hardening: reconnect stress + 72-hour soak
+
+Built-in recovery already covers: uxplay crashing mid-session (FSM back
+to IDLE + relaunch), a source dropping the RTSP channel, and a Miracast
+stream that dies while its control channel stays up (stream watchdog:
+render-process death or the group interface's rx counter flatlining for
+10 s force the same clean teardown as a normal disconnect).
+
+Both test procedures run on the same monitor:
+
+```bash
+# 72h soak -- start it and walk away; Ctrl+C prints the summary early:
+sudo bash tools/soak_monitor.sh
+
+# reconnect stress -- tight sampling, then manually cycle Windows/iPhone
+# connects and disconnects (aim for 20+ cycles, both protocols,
+# including mid-stream disconnects):
+sudo bash tools/soak_monitor.sh 1 5
+```
+
+Every sample records service liveness, systemd restart count, castd and
+uxplay memory, the `/health` endpoint's FSM state, and new journal ERROR
+lines; anomalies print immediately. Pass criteria: zero castd restarts,
+zero health outages, flat castd RSS, anomaly count 0.
+
 ## Next steps
 
-1. End-to-end Miracast session against the Windows 11 laptop: registrar
-   arming → association → WPS M1-M8 → DHCP → RTSP M1-M7 → video
-2. iPhone QR-join + UxPlay AirPlay mirroring against real iOS hardware
-3. 72-hour P2P GO soak test on the EDIMAX EW-7822UMX
+1. Audio validation on both protocols (HDMI output)
+2. 72-hour soak (procedure above) before multi-room deployment
+3. Idle-screen QR code for one-scan AirPlay joining; read-only rootfs

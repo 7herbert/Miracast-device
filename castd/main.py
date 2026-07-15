@@ -42,6 +42,7 @@ from castd.render.framebuffer import paint_framebuffer
 from castd.render.gstreamer import RenderProcess, RenderTarget, build_wfd_pipeline_description
 from castd.render.idle_screen import render_idle_screen
 from castd import sdnotify
+from castd.stream_watchdog import StreamWatchdog, read_interface_rx_bytes
 from castd.wfdsink.rtsp import NegotiationError, WfdCapabilities, WfdNegotiator
 from castd.wfdsink.session import RtspReader, listen_for_sources, negotiate, open_control_connection, run_steady_state
 
@@ -67,6 +68,7 @@ class CastDaemon:
         self.uxplay: UxPlayProcess | None = None
         self._rtsp_listener = None
         self._wifi_credentials: tuple[str, str] | None = None
+        self._active_control_sock = None
         self._lock = threading.Lock()
 
     def start(self) -> None:
@@ -108,6 +110,7 @@ class CastDaemon:
         dbus_thread.start()
 
         self.uxplay.start()
+        threading.Thread(target=self._stream_watch_loop, daemon=True).start()
 
         # Real-hardware testing found run_forever() was called a SECOND
         # time here (on the main thread, after already starting it above
@@ -226,9 +229,13 @@ class CastDaemon:
         inbound side across both phases so a message coalesced over the
         handshake/steady-state boundary is not lost."""
         reader = RtspReader(sock)
-        negotiator = self.handle_miracast_connected(source_ip, sock, reader=reader)
-        if negotiator is not None:
-            self._pump_control_channel(sock, negotiator, reader=reader)
+        self._active_control_sock = sock
+        try:
+            negotiator = self.handle_miracast_connected(source_ip, sock, reader=reader)
+            if negotiator is not None:
+                self._pump_control_channel(sock, negotiator, reader=reader)
+        finally:
+            self._active_control_sock = None
 
     def _pump_control_channel(self, sock, negotiator: WfdNegotiator, reader: RtspReader | None = None) -> None:
         try:
@@ -240,6 +247,45 @@ class CastDaemon:
                 pass
             logger.info("RTSP control channel closed; tearing down Miracast session")
             self.handle_miracast_disconnected()
+
+    def _stream_watch_loop(self, interval_s: float = 2.0) -> None:
+        """Auto-recovery for a Miracast session whose stream died while
+        its RTSP control channel stayed up (seen live 2026-07-15: first
+        session after boot froze on frame one and needed a manual
+        reconnect). Two death signals: the render process exiting, and
+        the group interface's rx counter flatlining (see
+        stream_watchdog.py). Recovery = close the session's control
+        socket, which funnels through the exact same clean teardown as a
+        normal source disconnect."""
+        watchdog = StreamWatchdog()
+        while True:
+            time.sleep(interval_s)
+            if self.arbiter.state is not State.MIRACAST:
+                watchdog.reset()
+                continue
+            if not self.render.is_running:
+                self._trip_stream_watchdog("render pipeline process died")
+                watchdog.reset()
+                continue
+            ifname = self.p2p.get_group_interface_name()
+            if ifname is None:
+                continue
+            try:
+                rx_bytes = read_interface_rx_bytes(ifname)
+            except (OSError, ValueError):
+                continue
+            if watchdog.observe(rx_bytes, time.monotonic()):
+                self._trip_stream_watchdog("no stream data for over 10s")
+                watchdog.reset()
+
+    def _trip_stream_watchdog(self, reason: str) -> None:
+        logger.warning("stream watchdog: %s; forcing Miracast session teardown", reason)
+        sock = self._active_control_sock
+        if sock is not None:
+            try:
+                sock.close()
+            except OSError:
+                pass
 
     def _accept_sources_loop(self) -> None:
         while True:

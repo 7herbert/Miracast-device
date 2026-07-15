@@ -208,6 +208,40 @@ def test_station_authorized_gives_up_cleanly_without_a_lease(monkeypatch):
     assert daemon.arbiter.state is State.IDLE
 
 
+def test_session_tracks_active_control_sock_for_the_watchdog(monkeypatch):
+    daemon = make_daemon(monkeypatch)
+    fake_session = WfdSessionParams(sink_rtp_port=1028, server_port=1, session_id="1")
+    monkeypatch.setattr(main_module, "negotiate", lambda s, **k: fake_session)
+    sock = FakeControlSock()
+    seen_during_pump = []
+    monkeypatch.setattr(
+        main_module, "run_steady_state", lambda s, n, **k: seen_during_pump.append(daemon._active_control_sock)
+    )
+
+    daemon._run_source_session("192.168.173.80", sock)
+
+    assert seen_during_pump == [sock]  # watchdog can reach the live session
+    assert daemon._active_control_sock is None  # and it's cleared afterwards
+
+
+def test_stream_watchdog_trip_closes_the_control_socket(monkeypatch):
+    # Closing the control socket funnels recovery through the same clean
+    # teardown as a normal source disconnect (run_steady_state sees the
+    # socket error, _pump_control_channel drives the FSM back to IDLE).
+    daemon = make_daemon(monkeypatch)
+    sock = FakeControlSock()
+    daemon._active_control_sock = sock
+
+    daemon._trip_stream_watchdog("no stream data for over 10s")
+
+    assert sock.closed
+
+
+def test_stream_watchdog_trip_without_a_session_is_a_noop(monkeypatch):
+    daemon = make_daemon(monkeypatch)
+    daemon._trip_stream_watchdog("render pipeline process died")  # must not raise
+
+
 def test_legacy_station_without_rtsp_service_stays_idle(monkeypatch):
     # An iPhone joining the group's Wi-Fi for AirPlay triggers the same
     # StaAuthorized path as a Miracast source but runs no RTSP server --
