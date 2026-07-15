@@ -33,12 +33,15 @@ class FakeRenderProcess:
 class FakeUxPlayProcess:
     def __init__(self, config=None, **kwargs) -> None:
         self.calls: list[str] = []
+        self.is_running = False
 
     def start(self) -> None:
         self.calls.append("start")
+        self.is_running = True
 
     def stop(self) -> None:
         self.calls.append("stop")
+        self.is_running = False
 
 
 def make_daemon(monkeypatch) -> main_module.CastDaemon:
@@ -210,6 +213,24 @@ def test_legacy_station_without_rtsp_service_stays_idle(monkeypatch):
     daemon._connect_to_authorized_source("7e:b3:6f:08:3b:2a")
 
     assert daemon.arbiter.state is State.IDLE
+
+
+def test_uxplay_crash_mid_airplay_recovers_to_idle_and_relaunches(monkeypatch):
+    # The 2026-07-14 failure mode: uxplay crashed mid-stream, nothing
+    # noticed, the FSM stayed in AIRPLAY and the room showed a black
+    # screen with no way back until a Miracast session cycled uxplay.
+    daemon = make_daemon(monkeypatch)
+    monkeypatch.setattr(main_module.time, "sleep", lambda s: None)
+
+    daemon._on_airplay_connected()
+    assert daemon.arbiter.state is State.AIRPLAY
+    daemon.uxplay.is_running = False  # the crash
+
+    daemon._on_uxplay_exited()
+
+    assert daemon.arbiter.state is State.IDLE
+    assert daemon.render.is_running  # idle screen back
+    assert daemon.uxplay.is_running  # relaunched
 
 
 def test_airplay_connect_releases_display_and_disconnect_reclaims_it(monkeypatch):

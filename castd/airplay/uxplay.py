@@ -90,7 +90,13 @@ def build_uxplay_argv(config: UxPlayConfig) -> list[str]:
         # connect (2026-07-14: taps produced zero uxplay log lines -- the
         # TCP connection never reached the new instance's sockets).
         "-p",
-        "-vs", "kmssink",
+        # driver-name=vc4 for the same reason castd's own pipelines carry
+        # it: the Pi 4 exposes two DRM devices (v3d render-only + vc4
+        # display) and a bare kmssink can open the wrong one. A real
+        # iPhone session got all the way to "Begin streaming to GStreamer
+        # video pipeline" and then died with "kmssink_h264 ... general
+        # resource error" for exactly this (2026-07-14).
+        "-vs", "kmssink driver-name=vc4 sync=false",
         "-as", "alsasink",
     ]
 
@@ -102,11 +108,14 @@ class UxPlayProcess:
         *,
         on_client_connected: Callable[[], None] | None = None,
         on_client_disconnected: Callable[[], None] | None = None,
+        on_process_ended: Callable[[], None] | None = None,
     ) -> None:
         self.config = config
         self._on_client_connected = on_client_connected
         self._on_client_disconnected = on_client_disconnected
+        self._on_process_ended = on_process_ended
         self._proc: subprocess.Popen | None = None
+        self._expect_exit = False
 
     @property
     def is_running(self) -> bool:
@@ -117,6 +126,7 @@ class UxPlayProcess:
             raise RuntimeError("uxplay is already running")
         argv = build_uxplay_argv(self.config)
         logger.info("starting uxplay: %s", " ".join(argv))
+        self._expect_exit = False
         # stdout is piped, but UNLIKE the earlier bug (a pipe nothing
         # read, which hid a fatal usage error) a dedicated thread relays
         # every line into our own log AND feeds the client tracker.
@@ -134,10 +144,18 @@ class UxPlayProcess:
             elif event == "disconnected" and self._on_client_disconnected is not None:
                 self._on_client_disconnected()
         logger.info("uxplay output stream ended")
+        # A real iPhone session crashed uxplay mid-stream (2026-07-14,
+        # the un-fixed kmssink resource error): nothing noticed, the FSM
+        # stayed in AIRPLAY, and the room was left with a black screen.
+        # Only fire for exits castd did NOT ask for -- stop() sets
+        # _expect_exit before terminating.
+        if not self._expect_exit and self._on_process_ended is not None:
+            self._on_process_ended()
 
     def stop(self, *, timeout: float = 3.0) -> None:
         if self._proc is None:
             return
+        self._expect_exit = True
         self._proc.terminate()
         try:
             self._proc.wait(timeout=timeout)

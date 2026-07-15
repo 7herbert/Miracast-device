@@ -100,6 +100,7 @@ class CastDaemon:
             UxPlayConfig(device_name=self.config.device_name),
             on_client_connected=self._on_airplay_connected,
             on_client_disconnected=self._on_airplay_disconnected,
+            on_process_ended=self._on_uxplay_exited,
         )
 
         dbus_thread = threading.Thread(target=self.p2p.run_forever, daemon=True)
@@ -163,6 +164,20 @@ class CastDaemon:
         with self._lock:
             transition = self.arbiter.handle(Event.AIRPLAY_DISCONNECTED)
         self._apply_actions(transition.actions)
+
+    def _on_uxplay_exited(self) -> None:
+        # uxplay died on its own (crashed mid-session on 2026-07-14 --
+        # NOT castd stopping it around a Miracast session; that path sets
+        # the expected-exit flag and never reaches here). Recover: drive
+        # the FSM out of AIRPLAY so the idle screen comes back, then
+        # relaunch so the room isn't left without AirPlay until the next
+        # Miracast cycle happens to restart it.
+        logger.warning("uxplay exited unexpectedly; recovering")
+        if self.arbiter.state is State.AIRPLAY:
+            self._on_airplay_disconnected()
+        if self.uxplay is not None and not self.uxplay.is_running:
+            time.sleep(2.0)  # keep a hard crash from looping tightly
+            self.uxplay.start()
 
     def _on_station_authorized(self, mac: str) -> None:
         # Runs on the GLib signal thread; hand off immediately.
