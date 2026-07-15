@@ -65,14 +65,23 @@ def build_wfd_pipeline_description(*, udp_port: int, target: RenderTarget) -> st
         (accept-anything sink template) breaks the doomed intersection
         and hands the decoder a profile string its driver does list."""
     connector = f" connector-id={target.connector_id}" if target.connector_id is not None else ""
-    # latency=50 + drop-on-latency: this is a one-hop P2P link a few
-    # meters long, not the internet -- 200 ms of jitter buffer (the first
-    # value tried) reads as visible lag on a mirrored mouse cursor.
-    # Stale packets get dropped instead of played late.
+    # latency=100, NO drop-on-latency: the drop-on-latency=true latency=50
+    # combination (tried for cursor lag) shredded the H.264 stream --
+    # every dropped TS packet corrupts the frame chain until the next
+    # IDR, and real Windows mirroring played back at a frame rate too low
+    # for video (2026-07-15). 100 ms of buffer on a one-hop P2P link is
+    # imperceptible next to the encode+decode latency; intact frames are
+    # not.
+    #
+    # Audio branch: leaky queue + alsasink sync=false so it can NEVER
+    # backpressure the video. alsasink's default sync=true paces to the
+    # pipeline clock; when it falls behind, its queue fills, tsdemux
+    # blocks on the audio pad, and the video branch starves -- the other
+    # half of the same low-frame-rate symptom.
     return (
         f"udpsrc port={udp_port} "
         f"! application/x-rtp,media=video,encoding-name=MP2T,payload=33,clock-rate=90000 "
-        f"! rtpjitterbuffer latency=50 drop-on-latency=true "
+        f"! rtpjitterbuffer latency=100 "
         f"! rtpmp2tdepay "
         f"! tsdemux name=demux "
         f"demux. ! queue ! h264parse "
@@ -80,7 +89,8 @@ def build_wfd_pipeline_description(*, udp_port: int, target: RenderTarget) -> st
         f"! v4l2h264dec ! v4l2convert "
         f"! video/x-raw,width={target.width},height={target.height},pixel-aspect-ratio=1/1 "
         f"! kmssink driver-name={target.driver_name}{connector} sync=false "
-        f"demux. ! queue ! aacparse ! avdec_aac ! audioconvert ! audioresample ! alsasink"
+        f"demux. ! queue leaky=downstream ! aacparse ! avdec_aac ! audioconvert ! audioresample "
+        f"! alsasink sync=false"
     )
 
 

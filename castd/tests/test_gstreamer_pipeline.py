@@ -44,11 +44,13 @@ def test_wfd_pipeline_bridges_decoder_to_kms_via_hardware_convert():
     assert "v4l2h264dec ! v4l2convert ! video/x-raw,width=1920,height=1080,pixel-aspect-ratio=1/1 ! kmssink" in desc
 
 
-def test_wfd_pipeline_uses_a_short_p2p_appropriate_jitter_buffer():
-    # One-hop P2P link: 200ms of jitter buffer read as visible mouse lag
-    # on real hardware; stale packets are dropped, not played late.
+def test_wfd_pipeline_jitter_buffer_never_drops_packets():
+    # drop-on-latency=true shredded the H.264 stream: one dropped TS
+    # packet corrupts everything until the next IDR, and real Windows
+    # mirroring played at a frame rate too low for video (2026-07-15).
     desc = build_wfd_pipeline_description(udp_port=1028, target=RenderTarget())
-    assert "rtpjitterbuffer latency=50 drop-on-latency=true" in desc
+    assert "rtpjitterbuffer latency=100" in desc
+    assert "drop-on-latency" not in desc
 
 
 def test_wfd_pipeline_rewrites_constrained_high_profile_for_the_decoder():
@@ -62,9 +64,13 @@ def test_wfd_pipeline_rewrites_constrained_high_profile_for_the_decoder():
     assert "h264parse ! capssetter join=true replace=false caps=video/x-h264,profile=(string)high ! v4l2h264dec" in desc
 
 
-def test_wfd_pipeline_audio_branch_can_resample_for_alsa():
+def test_wfd_pipeline_audio_branch_cannot_backpressure_video():
+    # alsasink's default sync=true paces to the pipeline clock; when it
+    # falls behind, its queue fills, tsdemux blocks, and the VIDEO branch
+    # starves. Leaky queue + sync=false make audio strictly best-effort.
     desc = build_wfd_pipeline_description(udp_port=1028, target=RenderTarget())
-    assert "audioconvert ! audioresample ! alsasink" in desc
+    assert "queue leaky=downstream ! aacparse" in desc
+    assert "audioconvert ! audioresample ! alsasink sync=false" in desc
 
 
 def test_no_idle_pipeline_builder_exists():
