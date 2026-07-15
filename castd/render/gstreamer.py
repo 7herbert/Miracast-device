@@ -83,7 +83,13 @@ def build_wfd_pipeline_description(*, udp_port: int, target: RenderTarget) -> st
         f"! application/x-rtp,media=video,encoding-name=MP2T,payload=33,clock-rate=90000 "
         f"! rtpjitterbuffer latency=100 "
         f"! rtpmp2tdepay "
-        f"! tsdemux name=demux "
+        # tsdemux's latency property DEFAULTS TO 700 MS -- a deliberate
+        # smooth-demuxing buffer paced by the TS PCR clock. Both sinks
+        # here run sync=false (frames render the moment they're decoded),
+        # so that buffer bought nothing and was the bulk of the ~1 s
+        # glass-to-glass lag measured against real Windows mirroring
+        # (2026-07-15).
+        f"! tsdemux name=demux latency=50 "
         f"demux. ! queue ! h264parse "
         f"! capssetter join=true replace=false caps=video/x-h264,profile=(string)high "
         f"! v4l2h264dec ! v4l2convert "

@@ -53,6 +53,14 @@ def test_wfd_pipeline_jitter_buffer_never_drops_packets():
     assert "drop-on-latency" not in desc
 
 
+def test_wfd_pipeline_overrides_tsdemux_700ms_default_latency():
+    # tsdemux defaults to a 700 ms smooth-demuxing buffer -- the bulk of
+    # a measured ~1 s glass-to-glass lag (2026-07-15). Useless here: both
+    # sinks are sync=false so nothing is paced by timestamps anyway.
+    desc = build_wfd_pipeline_description(udp_port=1028, target=RenderTarget())
+    assert "tsdemux name=demux latency=50" in desc
+
+
 def test_wfd_pipeline_rewrites_constrained_high_profile_for_the_decoder():
     # Real-hardware failure (2026-07-14): Windows streams H.264
     # constrained-high, which the bcm2835 V4L2 decoder's profile menu
