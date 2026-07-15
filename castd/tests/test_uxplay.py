@@ -43,13 +43,16 @@ def test_argv_renders_via_kms_and_alsa():
     assert argv[argv.index("-as") + 1] == "alsasink"
 
 
-def test_argv_uses_gpu_decode_path():
-    # Without -v4l2, uxplay fell back to software decode plus a double
-    # CPU RGB conversion and iPhone mirroring visibly stuttered
-    # (2026-07-15). -bt709 is the Pi colorimetry companion flag.
+def test_argv_keeps_software_decode_with_a_single_converter():
+    # Both hardware decode routes failed against a real iPhone's portrait
+    # 498x1080 stream (2026-07-15): decodebin's v4l2h264dec rejected the
+    # caps, and forcing -v4l2 removed the software fallback so sessions
+    # dropped instantly. The stutter fix is a single plain videoconvert
+    # (YUV passthrough to kmssink) instead of uxplay's default double CPU
+    # RGB conversion chain -- NOT a forced hardware decoder.
     argv = build_uxplay_argv(UxPlayConfig(device_name="X"))
-    assert "-v4l2" in argv
-    assert "-bt709" in argv
+    assert "-v4l2" not in argv
+    assert argv[argv.index("-vc") + 1] == "videoconvert"
 
 
 def test_tracker_reports_first_accept_as_connected():

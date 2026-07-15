@@ -98,15 +98,18 @@ def build_uxplay_argv(config: UxPlayConfig) -> list[str]:
         # resource error" for exactly this (2026-07-14).
         "-vs", "kmssink driver-name=vc4",
         "-as", "alsasink",
-        # GPU decode + GPU conversion (-v4l2 = -vd v4l2h264dec -vc
-        # v4l2convert), the same hardware path castd's Miracast pipeline
-        # uses. Without it uxplay's default decodebin rejected the
-        # iPhone's portrait 498x1080 stream into avdec_h264 (software)
-        # feeding a double CPU videoconvert to RGB -- visibly stuttery
-        # video on a real iPhone (2026-07-15). -bt709 is the colorimetry
-        # flag UxPlay documents as needed on Raspberry Pi with v4l2.
-        "-v4l2",
-        "-bt709",
+        # Decode stays SOFTWARE on purpose. Both hardware routes failed
+        # against a real iPhone's portrait 498x1080 stream (2026-07-15):
+        # decodebin's v4l2h264dec candidate rejected the caps (width not
+        # macroblock-aligned) and fell back to avdec_h264, and forcing
+        # -v4l2 removed that fallback so the session dropped instantly.
+        # What made software decode stutter was NOT the decoder but
+        # uxplay's default converter chain -- videoconvert ! RGB caps !
+        # videoconvert, two full-frame CPU color conversions per frame.
+        # A single plain videoconvert lets YUV pass through to kmssink
+        # (vc4 planes take YUV directly), cutting the per-frame CPU cost
+        # to the decode itself.
+        "-vc", "videoconvert",
     ]
 
 
