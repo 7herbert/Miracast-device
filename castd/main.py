@@ -38,7 +38,8 @@ from castd.fsm.state_machine import Action, CastArbiter, Event, State
 from castd.health import HealthState, serve_forever
 from castd.p2p.dbus_go import GroupInfo, P2PGroupOwner
 from castd.p2p.group_network import SINK_IP, GroupNetwork, find_lease_ip
-from castd.render.gstreamer import RenderProcess, RenderTarget, build_idle_screen_pipeline, build_wfd_pipeline_description
+from castd.render.framebuffer import paint_framebuffer
+from castd.render.gstreamer import RenderProcess, RenderTarget, build_wfd_pipeline_description
 from castd.render.idle_screen import render_idle_screen
 from castd import sdnotify
 from castd.wfdsink.rtsp import NegotiationError, WfdCapabilities, WfdNegotiator
@@ -260,16 +261,23 @@ class CastDaemon:
         # generates is different on every negotiation attempt (see
         # p2p/dbus_go.py's module docstring) -- there is no fixed PIN to
         # bake into a static image once at startup. This regenerates the
-        # PNG and restarts the render pipeline every time a peer requests
-        # one, so whatever is on screen is always the PIN that will
-        # actually work right now.
+        # PNG and repaints it every time a peer requests one, so whatever
+        # is on screen is always the PIN that will actually work right now.
+        #
+        # Painted via /dev/fb0, NOT a kmssink pipeline: an idle kmssink
+        # holds DRM master, and UxPlay -- which opens its own kmssink once
+        # at startup -- then never becomes master and every AirPlay
+        # session dies at the first frame (2026-07-15). The framebuffer
+        # path takes no master, so the DRM device stays free for whichever
+        # streaming pipeline needs it. See render/framebuffer.py.
         ssid, password = self._wifi_credentials or (None, None)
         render_idle_screen(
             IDLE_PNG_PATH, room_name=self.config.room_name, pin=pin, wifi_ssid=ssid, wifi_password=password
         )
-        if self.render.is_running:
-            self.render.stop()
-        self.render.start(build_idle_screen_pipeline(png_path=IDLE_PNG_PATH, target=self.render_target))
+        try:
+            paint_framebuffer(IDLE_PNG_PATH)
+        except (OSError, ValueError):
+            logger.exception("could not paint the idle screen to the framebuffer")
 
     def _on_display_pin_needed(self, pin: str) -> None:
         logger.info("displaying live WPS PIN on kiosk screen: %s", pin)

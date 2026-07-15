@@ -39,7 +39,7 @@ def test_argv_renders_via_kms_and_alsa():
     # driver-name=vc4: the Pi 4 has two DRM devices and a bare kmssink
     # can open the render-only one -- a real iPhone session died with
     # "kmssink_h264 ... general resource error" (2026-07-14).
-    assert argv[argv.index("-vs") + 1] == "kmssink driver-name=vc4 sync=false"
+    assert argv[argv.index("-vs") + 1] == "kmssink driver-name=vc4"
     assert argv[argv.index("-as") + 1] == "alsasink"
 
 

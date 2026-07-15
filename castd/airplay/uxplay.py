@@ -96,7 +96,7 @@ def build_uxplay_argv(config: UxPlayConfig) -> list[str]:
         # iPhone session got all the way to "Begin streaming to GStreamer
         # video pipeline" and then died with "kmssink_h264 ... general
         # resource error" for exactly this (2026-07-14).
-        "-vs", "kmssink driver-name=vc4 sync=false",
+        "-vs", "kmssink driver-name=vc4",
         "-as", "alsasink",
     ]
 

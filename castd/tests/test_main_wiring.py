@@ -47,11 +47,14 @@ class FakeUxPlayProcess:
 def make_daemon(monkeypatch) -> main_module.CastDaemon:
     config = RoomConfig(room_name="MR-TEST", wps_pin="12345670", passphrase="abcdefghij", channel=36)
     monkeypatch.setattr(main_module, "UxPlayProcess", FakeUxPlayProcess)
-    # render_idle_screen writes a real PNG to disk (IDLE_PNG_PATH); fake it
-    # out here so _apply_actions(SHOW_IDLE_SCREEN) doesn't touch the
-    # filesystem during these wiring tests, same as render/uxplay/negotiate.
+    # render_idle_screen writes a real PNG and paint_framebuffer writes to
+    # /dev/fb0; fake both so _apply_actions(SHOW_IDLE_SCREEN) doesn't touch
+    # the filesystem during these wiring tests, same as render/uxplay/
+    # negotiate. Tests that care about idle repaints record them.
     monkeypatch.setattr(main_module, "render_idle_screen", lambda *a, **k: None)
     daemon = main_module.CastDaemon(config)
+    daemon.idle_paints: list = []
+    monkeypatch.setattr(main_module, "paint_framebuffer", lambda *a, **k: daemon.idle_paints.append(a))
     daemon.render = FakeRenderProcess()
     daemon.uxplay = FakeUxPlayProcess()
     return daemon
@@ -102,10 +105,17 @@ def test_miracast_disconnect_stops_render_and_shows_idle_screen(monkeypatch):
     monkeypatch.setattr(main_module, "negotiate", lambda sock, **k: fake_session)
 
     daemon.handle_miracast_connected("192.168.173.80", sock=object())
+    paints_before = len(daemon.idle_paints)
     daemon.handle_miracast_disconnected()
 
     assert daemon.arbiter.state is State.IDLE
-    assert daemon.render.calls[-1].startswith("start:")  # idle screen pipeline restarted
+    # The idle screen is a framebuffer paint, NOT a render pipeline: an
+    # idle kmssink would hold DRM master and starve UxPlay of it
+    # (2026-07-15). The streaming pipeline must be stopped and stay
+    # stopped, with the idle image repainted via /dev/fb0.
+    assert daemon.render.calls[-1] == "stop"
+    assert not daemon.render.is_running
+    assert len(daemon.idle_paints) > paints_before
     assert "start" in daemon.uxplay.calls
 
 
@@ -226,25 +236,30 @@ def test_uxplay_crash_mid_airplay_recovers_to_idle_and_relaunches(monkeypatch):
     assert daemon.arbiter.state is State.AIRPLAY
     daemon.uxplay.is_running = False  # the crash
 
+    paints_before = len(daemon.idle_paints)
     daemon._on_uxplay_exited()
 
     assert daemon.arbiter.state is State.IDLE
-    assert daemon.render.is_running  # idle screen back
+    assert len(daemon.idle_paints) > paints_before  # idle screen repainted
     assert daemon.uxplay.is_running  # relaunched
 
 
 def test_airplay_connect_releases_display_and_disconnect_reclaims_it(monkeypatch):
-    # The DRM handoff: UxPlay's own kmssink cannot become DRM master while
-    # the idle screen holds it -- a real iPhone got "cannot connect"
-    # (2026-07-14). AIRPLAY_CONNECTED must stop our render pipeline.
+    # The DRM handoff: any render pipeline castd still holds must stop
+    # when an AirPlay client connects, and afterwards the idle screen
+    # comes back as a framebuffer paint -- never as a kmssink pipeline,
+    # which would hold DRM master and starve UxPlay's next session
+    # (2026-07-15).
     daemon = make_daemon(monkeypatch)
-    daemon.render.start("idle")
+    daemon.render.start("leftover-stream")
     assert daemon.render.is_running
 
     daemon._on_airplay_connected()
     assert daemon.arbiter.state is State.AIRPLAY
     assert not daemon.render.is_running  # DRM released for UxPlay
 
+    paints_before = len(daemon.idle_paints)
     daemon._on_airplay_disconnected()
     assert daemon.arbiter.state is State.IDLE
-    assert daemon.render.is_running  # idle screen back on
+    assert not daemon.render.is_running  # DRM stays free
+    assert len(daemon.idle_paints) > paints_before  # idle screen repainted

@@ -84,16 +84,11 @@ def build_wfd_pipeline_description(*, udp_port: int, target: RenderTarget) -> st
     )
 
 
-def build_idle_screen_pipeline(*, png_path: str, target: RenderTarget) -> str:
-    """Static idle screen (room name / PIN / QR code) via GStreamer instead
-    of fbi, so the idle path and the streaming path share one process model
-    and one place to reason about DRM master ownership handoff."""
-    connector = f" connector-id={target.connector_id}" if target.connector_id is not None else ""
-    return (
-        f"filesrc location={png_path} "
-        f"! decodebin ! imagefreeze "
-        f"! kmssink driver-name={target.driver_name}{connector} sync=false"
-    )
+# NOTE: the idle screen deliberately does NOT go through this module any
+# more. An idle kmssink pipeline holds DRM master and starves UxPlay's
+# startup-time kmssink of it (2026-07-15) -- the idle image is painted
+# via the framebuffer instead (render/framebuffer.py), leaving this
+# module to the one true DRM client at a time: the Miracast stream.
 
 
 class RenderProcess:

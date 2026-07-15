@@ -1,7 +1,7 @@
 """Tests for the pure pipeline-string builders in castd.render.gstreamer.
 No GStreamer required -- these lock in wire-format details that real
 hardware proved fatal when wrong."""
-from castd.render.gstreamer import RenderTarget, build_idle_screen_pipeline, build_wfd_pipeline_description
+from castd.render.gstreamer import RenderTarget, build_wfd_pipeline_description
 
 
 def test_wfd_pipeline_rtp_caps_are_fully_fixed():
@@ -67,7 +67,10 @@ def test_wfd_pipeline_audio_branch_can_resample_for_alsa():
     assert "audioconvert ! audioresample ! alsasink" in desc
 
 
-def test_idle_pipeline_renders_png_to_kms():
-    desc = build_idle_screen_pipeline(png_path="/opt/castd/idle_screen.png", target=RenderTarget())
-    assert desc.startswith("filesrc location=/opt/castd/idle_screen.png")
-    assert "kmssink driver-name=vc4" in desc
+def test_no_idle_pipeline_builder_exists():
+    # The idle screen must never be a kmssink pipeline again: it holds DRM
+    # master and starves UxPlay's startup-time kmssink (2026-07-15). It is
+    # painted via render/framebuffer.py instead.
+    import castd.render.gstreamer as gstreamer
+
+    assert not hasattr(gstreamer, "build_idle_screen_pipeline")
