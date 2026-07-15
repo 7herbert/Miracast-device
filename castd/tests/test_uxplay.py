@@ -43,6 +43,15 @@ def test_argv_renders_via_kms_and_alsa():
     assert argv[argv.index("-as") + 1] == "alsasink"
 
 
+def test_argv_uses_gpu_decode_path():
+    # Without -v4l2, uxplay fell back to software decode plus a double
+    # CPU RGB conversion and iPhone mirroring visibly stuttered
+    # (2026-07-15). -bt709 is the Pi colorimetry companion flag.
+    argv = build_uxplay_argv(UxPlayConfig(device_name="X"))
+    assert "-v4l2" in argv
+    assert "-bt709" in argv
+
+
 def test_tracker_reports_first_accept_as_connected():
     t = UxPlayClientTracker()
     assert t.feed("Accepted IPv4 client on socket 12") == "connected"

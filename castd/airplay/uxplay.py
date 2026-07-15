@@ -98,6 +98,15 @@ def build_uxplay_argv(config: UxPlayConfig) -> list[str]:
         # resource error" for exactly this (2026-07-14).
         "-vs", "kmssink driver-name=vc4",
         "-as", "alsasink",
+        # GPU decode + GPU conversion (-v4l2 = -vd v4l2h264dec -vc
+        # v4l2convert), the same hardware path castd's Miracast pipeline
+        # uses. Without it uxplay's default decodebin rejected the
+        # iPhone's portrait 498x1080 stream into avdec_h264 (software)
+        # feeding a double CPU videoconvert to RGB -- visibly stuttery
+        # video on a real iPhone (2026-07-15). -bt709 is the colorimetry
+        # flag UxPlay documents as needed on Raspberry Pi with v4l2.
+        "-v4l2",
+        "-bt709",
     ]
 
 
