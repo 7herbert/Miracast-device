@@ -27,11 +27,6 @@ from dataclasses import dataclass
 
 logger = logging.getLogger(__name__)
 
-# 200ms: enough to absorb normal decode/schedule jitter without ever
-# letting the video branch drift seconds behind live -- see the
-# build_wfd_pipeline_description docstring for why this exists.
-VIDEO_QUEUE_MAX_TIME_NS = 200_000_000
-
 # Opt-in latency diagnosis, scoped to ONLY this pipeline's subprocess.
 # A 2026-07-15 attempt to trace where a ~5s lag came from set GST_DEBUG/
 # GST_TRACERS via `systemctl edit castd` -- a systemd Environment= line
@@ -99,37 +94,35 @@ def build_wfd_pipeline_description(*, udp_port: int, target: RenderTarget) -> st
     # blocks on the audio pad, and the video branch starves -- the other
     # half of the same low-frame-rate symptom.
     #
-    # Video queue is bounded + leaky too, for a lesson learned the hard
-    # way (2026-07-15): a plain `queue` defaults to max-size-buffers=200 /
-    # max-size-bytes=10MB / max-size-time=1s and does NOT drop -- it just
-    # blocks once full. With both sinks sync=false (nothing paces
-    # playback to a clock), the only thing standing between "decode is
-    # ever so slightly slower than arrival" and unbounded backlog growth
-    # was that 1 s ceiling, and once background threads on a Pi 4 (WPS
-    # PIN repaints, watchdog polling, dnsmasq) stole a few ms here and
-    # there over a multi-minute session, compressed frames piled up
-    # toward that ceiling and stayed there -- a real session was measured
-    # 5 s behind live while the (independently leaky) audio branch never
-    # drifted. VIDEO_QUEUE_MAX_TIME_NS caps the same way the audio queue
-    # already does: old undecoded frames get dropped to catch back up
-    # instead of accumulating, at the cost of an occasional glitch until
-    # the next IDR -- the same freshness-over-completeness trade already
-    # made for the jitter buffer and the audio branch.
+    # Two things TRIED AND REVERTED while chasing a ~5s lag report
+    # (2026-07-15), left here so they are not tried again blind:
+    #   - leaky=downstream on the VIDEO queue (bounding it the same way
+    #     the audio queue is bounded, to stop backlog from accumulating
+    #     unboundedly toward the plain queue's ~1s default ceiling).
+    #     Correlated with a real connection regression -- worse than the
+    #     unbounded-queue baseline -- on the very next hardware test.
+    #     Suspected mechanism: leaky dropping is at the mercy of WHERE in
+    #     the compressed byte stream it lands; drop the wrong buffer
+    #     (e.g. one carrying SPS/PPS right as h264parse is still trying
+    #     to lock onto the stream at connection start) and parsing never
+    #     recovers, so capssetter/v4l2h264dec never get valid caps and
+    #     the whole pipeline fails to negotiate -- the compressed-domain
+    #     version of the same "dropping anything mid-stream is dangerous"
+    #     lesson already learned from the RTP-level drop-on-latency
+    #     experiment. The backlog-accumulation theory this was meant to
+    #     fix was also never confirmed independently (the 5s number did
+    #     not move when this queue was tried, for whatever that is worth).
+    #   - rtpjitterbuffer mode=0 (below every other place mode= would
+    #     show up if re-tried) -- untested in isolation, tested only
+    #     stacked with the queue change above, so no clean verdict either
+    #     way; worth retrying alone before assuming it caused anything.
+    # The pipeline below is deliberately back to the last hardware-
+    # verified-stable shape (plain, unbounded, non-leaky video queue;
+    # default rtpjitterbuffer mode) while root-causing the lag separately.
     return (
         f"udpsrc port={udp_port} "
         f"! application/x-rtp,media=video,encoding-name=MP2T,payload=33,clock-rate=90000 "
-        # mode=0 (none): rtpjitterbuffer's default mode=slave tries to
-        # discipline the receiver's clock to the sender's via RTCP SR
-        # reports. There is no shared time source over this P2P link and
-        # this DIY-negotiated WFD source is not guaranteed to send
-        # regular RTCP SRs, and clock-skew "slaving" under those
-        # conditions is a known way for rtpjitterbuffer to grow delay
-        # that settles at a fixed multi-second value and stays there --
-        # matching a real session measured at a STABLE ~5s lag that two
-        # rounds of queue-sizing fixes did not move at all (2026-07-15).
-        # mode=none buffers purely off RTP timestamps/arrival time, no
-        # sender-clock discipline.
-        f"! rtpjitterbuffer latency=100 mode=0 "
+        f"! rtpjitterbuffer latency=100 "
         f"! rtpmp2tdepay "
         # tsdemux's latency property DEFAULTS TO 700 MS -- a deliberate
         # smooth-demuxing buffer paced by the TS PCR clock. Both sinks
@@ -138,8 +131,7 @@ def build_wfd_pipeline_description(*, udp_port: int, target: RenderTarget) -> st
         # glass-to-glass lag measured against real Windows mirroring
         # (2026-07-15).
         f"! tsdemux name=demux latency=50 "
-        f"demux. ! queue max-size-buffers=0 max-size-bytes=0 "
-        f"max-size-time={VIDEO_QUEUE_MAX_TIME_NS} leaky=downstream ! h264parse "
+        f"demux. ! queue ! h264parse "
         f"! capssetter join=true replace=false caps=video/x-h264,profile=(string)high "
         f"! v4l2h264dec ! v4l2convert "
         f"! video/x-raw,width={target.width},height={target.height},pixel-aspect-ratio=1/1 "

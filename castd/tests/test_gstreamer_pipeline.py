@@ -53,17 +53,15 @@ def test_wfd_pipeline_jitter_buffer_never_drops_packets():
     assert "drop-on-latency" not in desc
 
 
-def test_wfd_pipeline_jitter_buffer_does_not_slave_to_sender_clock():
-    # mode=slave (the default) disciplines the receiver's clock to the
-    # sender's via RTCP SR. There is no shared time source over this P2P
-    # link, this DIY WFD source is not guaranteed to send regular RTCP
-    # SRs, and clock-skew slaving under those conditions is a known way
-    # to grow a fixed multi-second delay that settles and stays put --
-    # matching a real session stuck at a stable ~5s lag that two rounds
-    # of queue-sizing fixes did not move (2026-07-15). mode=0 (none)
-    # buffers purely off RTP timestamps/local arrival time.
+def test_wfd_pipeline_jitter_buffer_uses_default_mode():
+    # mode=0 was tried against a real ~5s lag report (2026-07-15) but only
+    # ever tested stacked with the video-queue change below, which itself
+    # correlated with a connection regression -- no clean verdict on mode
+    # either way, so it stays at its default (mode=slave) until it can be
+    # retried in isolation. See build_wfd_pipeline_description's docstring.
     desc = build_wfd_pipeline_description(udp_port=1028, target=RenderTarget())
-    assert "rtpjitterbuffer latency=100 mode=0" in desc
+    assert "rtpjitterbuffer latency=100 " in desc
+    assert "mode=0" not in desc
 
 
 def test_wfd_pipeline_overrides_tsdemux_700ms_default_latency():
@@ -85,17 +83,19 @@ def test_wfd_pipeline_rewrites_constrained_high_profile_for_the_decoder():
     assert "capssetter join=true replace=false caps=video/x-h264,profile=(string)high ! v4l2h264dec" in desc
 
 
-def test_wfd_pipeline_video_queue_is_bounded_and_leaky():
-    # A plain `queue` defaults to max-size-time=1s and does NOT drop --
-    # it blocks once full. With both sinks sync=false, nothing paces
-    # playback to a clock, so any sustained decode/schedule deficit (even
-    # a few ms per frame) let compressed frames pile up toward that 1s
-    # ceiling and stay there: a real session measured 5s of glass-to-
-    # glass lag while the independently-leaky audio branch never drifted
-    # (2026-07-15). Bounding + leaking this queue the same way caps
-    # backlog instead of letting it accumulate.
+def test_wfd_pipeline_video_queue_is_plain_not_leaky():
+    # A bounded+leaky video queue was tried against a real ~5s lag report
+    # (2026-07-15) and correlated with a connection regression on the very
+    # next hardware test: leaky dropping in the compressed domain is at
+    # the mercy of WHERE it lands, and dropping the wrong buffer (e.g. one
+    # carrying SPS/PPS while h264parse is still locking onto the stream
+    # at connection start) can mean parsing never recovers and the
+    # decoder never gets valid caps. Reverted to plain (unbounded,
+    # non-leaky) pending root-causing the lag a different way -- see
+    # build_wfd_pipeline_description's docstring.
     desc = build_wfd_pipeline_description(udp_port=1028, target=RenderTarget())
-    assert "queue max-size-buffers=0 max-size-bytes=0 max-size-time=200000000 leaky=downstream ! h264parse" in desc
+    assert "demux. ! queue ! h264parse" in desc
+    assert "leaky=downstream ! h264parse" not in desc
 
 
 def test_wfd_pipeline_audio_branch_cannot_backpressure_video():
