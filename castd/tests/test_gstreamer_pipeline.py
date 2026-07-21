@@ -69,7 +69,20 @@ def test_wfd_pipeline_rewrites_constrained_high_profile_for_the_decoder():
     # capssetter overrides the profile field to "high" (a strict
     # superset, lossless to decode as) before the decoder sees it.
     desc = build_wfd_pipeline_description(udp_port=1028, target=RenderTarget())
-    assert "h264parse ! capssetter join=true replace=false caps=video/x-h264,profile=(string)high ! v4l2h264dec" in desc
+    assert "capssetter join=true replace=false caps=video/x-h264,profile=(string)high ! v4l2h264dec" in desc
+
+
+def test_wfd_pipeline_video_queue_is_bounded_and_leaky():
+    # A plain `queue` defaults to max-size-time=1s and does NOT drop --
+    # it blocks once full. With both sinks sync=false, nothing paces
+    # playback to a clock, so any sustained decode/schedule deficit (even
+    # a few ms per frame) let compressed frames pile up toward that 1s
+    # ceiling and stay there: a real session measured 5s of glass-to-
+    # glass lag while the independently-leaky audio branch never drifted
+    # (2026-07-15). Bounding + leaking this queue the same way caps
+    # backlog instead of letting it accumulate.
+    desc = build_wfd_pipeline_description(udp_port=1028, target=RenderTarget())
+    assert "queue max-size-buffers=0 max-size-bytes=0 max-size-time=200000000 leaky=downstream ! h264parse" in desc
 
 
 def test_wfd_pipeline_audio_branch_cannot_backpressure_video():

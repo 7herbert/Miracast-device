@@ -26,6 +26,11 @@ from dataclasses import dataclass
 
 logger = logging.getLogger(__name__)
 
+# 200ms: enough to absorb normal decode/schedule jitter without ever
+# letting the video branch drift seconds behind live -- see the
+# build_wfd_pipeline_description docstring for why this exists.
+VIDEO_QUEUE_MAX_TIME_NS = 200_000_000
+
 
 @dataclass(frozen=True)
 class RenderTarget:
@@ -78,6 +83,23 @@ def build_wfd_pipeline_description(*, udp_port: int, target: RenderTarget) -> st
     # pipeline clock; when it falls behind, its queue fills, tsdemux
     # blocks on the audio pad, and the video branch starves -- the other
     # half of the same low-frame-rate symptom.
+    #
+    # Video queue is bounded + leaky too, for a lesson learned the hard
+    # way (2026-07-15): a plain `queue` defaults to max-size-buffers=200 /
+    # max-size-bytes=10MB / max-size-time=1s and does NOT drop -- it just
+    # blocks once full. With both sinks sync=false (nothing paces
+    # playback to a clock), the only thing standing between "decode is
+    # ever so slightly slower than arrival" and unbounded backlog growth
+    # was that 1 s ceiling, and once background threads on a Pi 4 (WPS
+    # PIN repaints, watchdog polling, dnsmasq) stole a few ms here and
+    # there over a multi-minute session, compressed frames piled up
+    # toward that ceiling and stayed there -- a real session was measured
+    # 5 s behind live while the (independently leaky) audio branch never
+    # drifted. VIDEO_QUEUE_MAX_TIME_NS caps the same way the audio queue
+    # already does: old undecoded frames get dropped to catch back up
+    # instead of accumulating, at the cost of an occasional glitch until
+    # the next IDR -- the same freshness-over-completeness trade already
+    # made for the jitter buffer and the audio branch.
     return (
         f"udpsrc port={udp_port} "
         f"! application/x-rtp,media=video,encoding-name=MP2T,payload=33,clock-rate=90000 "
@@ -90,7 +112,8 @@ def build_wfd_pipeline_description(*, udp_port: int, target: RenderTarget) -> st
         # glass-to-glass lag measured against real Windows mirroring
         # (2026-07-15).
         f"! tsdemux name=demux latency=50 "
-        f"demux. ! queue ! h264parse "
+        f"demux. ! queue max-size-buffers=0 max-size-bytes=0 "
+        f"max-size-time={VIDEO_QUEUE_MAX_TIME_NS} leaky=downstream ! h264parse "
         f"! capssetter join=true replace=false caps=video/x-h264,profile=(string)high "
         f"! v4l2h264dec ! v4l2convert "
         f"! video/x-raw,width={target.width},height={target.height},pixel-aspect-ratio=1/1 "
