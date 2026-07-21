@@ -12,7 +12,8 @@ from __future__ import annotations
 
 import castd.main as main_module
 from castd.config import RoomConfig
-from castd.fsm.state_machine import State
+from castd.fsm.state_machine import Event, State
+from castd.stream_watchdog import StreamWatchdog
 from castd.wfdsink.rtsp import WfdSessionParams
 
 
@@ -240,6 +241,77 @@ def test_stream_watchdog_trip_closes_the_control_socket(monkeypatch):
 def test_stream_watchdog_trip_without_a_session_is_a_noop(monkeypatch):
     daemon = make_daemon(monkeypatch)
     daemon._trip_stream_watchdog("render pipeline process died")  # must not raise
+
+
+def test_watchdog_ignores_render_not_yet_started_during_handshake(monkeypatch):
+    # The 2026-07-21 regression: the FSM enters MIRACAST the instant a
+    # source connects, but the WFD render pipeline only starts once M1-M7
+    # negotiation finishes -- a legitimate 1-3s+ window where
+    # render.is_running is correctly False. A watchdog tick landing there
+    # closed the control socket mid-handshake ("Bad file descriptor"),
+    # making a session that never even had a chance to connect look like
+    # a crash. _render_pipeline_expected must stay False until
+    # handle_miracast_connected actually calls render.start().
+    daemon = make_daemon(monkeypatch)
+    with daemon._lock:
+        daemon.arbiter.handle(Event.MIRACAST_CONNECTED)
+    sock = FakeControlSock()
+    daemon._active_control_sock = sock
+    assert daemon.render.is_running is False  # negotiation still "in flight"
+
+    daemon._stream_watch_tick(StreamWatchdog())
+
+    assert not sock.closed  # must NOT have tripped
+
+
+def test_watchdog_trips_once_render_was_actually_expected_and_died(monkeypatch):
+    # The case the watchdog exists for (2026-07-15): render DID start,
+    # then died mid-session. Once _render_pipeline_expected is set (only
+    # done by handle_miracast_connected after a successful render.start),
+    # is_running=False is a real crash and must trip.
+    daemon = make_daemon(monkeypatch)
+    with daemon._lock:
+        daemon.arbiter.handle(Event.MIRACAST_CONNECTED)
+    daemon._render_pipeline_expected = True
+    daemon.render.is_running = False  # crashed
+    sock = FakeControlSock()
+    daemon._active_control_sock = sock
+
+    daemon._stream_watch_tick(StreamWatchdog())
+
+    assert sock.closed
+
+
+def test_successful_connect_arms_the_render_expectation_flag(monkeypatch):
+    daemon = make_daemon(monkeypatch)
+    fake_session = WfdSessionParams(sink_rtp_port=1028, server_port=1, session_id="1")
+    monkeypatch.setattr(main_module, "negotiate", lambda s, **k: fake_session)
+
+    assert daemon._render_pipeline_expected is False
+    daemon.handle_miracast_connected("192.168.173.80", sock=object())
+    assert daemon._render_pipeline_expected is True
+
+
+class _FakeP2PNoGroup:
+    def get_group_interface_name(self):
+        return None  # tick short-circuits before touching rx-byte counters
+
+
+def test_leaving_miracast_disarms_the_render_expectation_flag(monkeypatch):
+    daemon = make_daemon(monkeypatch)
+    daemon._render_pipeline_expected = True
+    daemon.render.is_running = True  # a legitimately live session
+    daemon.p2p = _FakeP2PNoGroup()
+    with daemon._lock:
+        daemon.arbiter.handle(Event.MIRACAST_CONNECTED)
+
+    daemon._stream_watch_tick(StreamWatchdog())  # still MIRACAST: untouched
+    assert daemon._render_pipeline_expected is True
+
+    with daemon._lock:
+        daemon.arbiter.handle(Event.MIRACAST_DISCONNECTED)
+    daemon._stream_watch_tick(StreamWatchdog())  # back to IDLE: disarmed
+    assert daemon._render_pipeline_expected is False
 
 
 def test_legacy_station_without_rtsp_service_stays_idle(monkeypatch):

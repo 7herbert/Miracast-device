@@ -69,6 +69,18 @@ class CastDaemon:
         self._rtsp_listener = None
         self._wifi_credentials: tuple[str, str] | None = None
         self._active_control_sock = None
+        # See _stream_watch_loop: the FSM flips to MIRACAST the instant a
+        # source connects, but self.render.start() for THIS session's WFD
+        # pipeline only happens after the M1-M7 RTSP handshake finishes,
+        # which is legitimately a 1-3s+ round trip. Checking render.is_
+        # running before that point is a guaranteed false positive, not
+        # an edge case -- every single connection raced it after the idle
+        # screen stopped running a persistent RenderProcess pipeline
+        # (2026-07-15's framebuffer rewrite closed the "leftover idle
+        # pipeline still technically running" gap that had been
+        # accidentally masking this). Real fix: only arm the "is it still
+        # running" check once it has actually started.
+        self._render_pipeline_expected = False
         self._lock = threading.Lock()
 
     def start(self) -> None:
@@ -256,27 +268,50 @@ class CastDaemon:
         the group interface's rx counter flatlining (see
         stream_watchdog.py). Recovery = close the session's control
         socket, which funnels through the exact same clean teardown as a
-        normal source disconnect."""
+        normal source disconnect.
+
+        The render-process check is gated on _render_pipeline_expected,
+        which only becomes true once handle_miracast_connected actually
+        calls self.render.start() for this session. Without that gate
+        this fired on essentially every connection attempt (2026-07-21):
+        the FSM enters MIRACAST the instant a source connects, but the
+        WFD render pipeline doesn't start until the M1-M7 RTSP handshake
+        finishes -- a legitimate 1-3s+ window where render.is_running is
+        correctly False, not evidence of anything dying. A watchdog tick
+        landing in that window closed the session's control socket out
+        from under the negotiation still in progress, surfacing as
+        "Bad file descriptor" mid-handshake and a session that looked
+        like it could never connect at all."""
         watchdog = StreamWatchdog()
         while True:
             time.sleep(interval_s)
-            if self.arbiter.state is not State.MIRACAST:
-                watchdog.reset()
-                continue
-            if not self.render.is_running:
-                self._trip_stream_watchdog("render pipeline process died")
-                watchdog.reset()
-                continue
-            ifname = self.p2p.get_group_interface_name()
-            if ifname is None:
-                continue
-            try:
-                rx_bytes = read_interface_rx_bytes(ifname)
-            except (OSError, ValueError):
-                continue
-            if watchdog.observe(rx_bytes, time.monotonic()):
-                self._trip_stream_watchdog("no stream data for over 10s")
-                watchdog.reset()
+            self._stream_watch_tick(watchdog)
+
+    def _stream_watch_tick(self, watchdog: StreamWatchdog) -> None:
+        """One sampling pass, split out from _stream_watch_loop so the
+        gating logic (not just the sleep-forever wrapper) is directly
+        unit-testable."""
+        if self.arbiter.state is not State.MIRACAST:
+            watchdog.reset()
+            self._render_pipeline_expected = False
+            return
+        if not self._render_pipeline_expected:
+            return
+        if not self.render.is_running:
+            self._trip_stream_watchdog("render pipeline process died")
+            watchdog.reset()
+            self._render_pipeline_expected = False
+            return
+        ifname = self.p2p.get_group_interface_name()
+        if ifname is None:
+            return
+        try:
+            rx_bytes = read_interface_rx_bytes(ifname)
+        except (OSError, ValueError):
+            return
+        if watchdog.observe(rx_bytes, time.monotonic()):
+            self._trip_stream_watchdog("no stream data for over 10s")
+            watchdog.reset()
 
     def _trip_stream_watchdog(self, reason: str) -> None:
         logger.warning("stream watchdog: %s; forcing Miracast session teardown", reason)
@@ -371,6 +406,10 @@ class CastDaemon:
             )
             self.render.stop()
             self.render.start(build_wfd_pipeline_description(udp_port=WFD_UDP_PORT, target=self.render_target))
+            # Only from this point on has the stream watchdog's "is the
+            # render process still running" check earned any meaning --
+            # see _stream_watch_loop for why this flag exists at all.
+            self._render_pipeline_expected = True
             logger.info("Miracast streaming started, session=%s", session.session_id)
             return negotiator
         except (NegotiationError, OSError):
