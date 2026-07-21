@@ -21,6 +21,7 @@ properties are driver-name/bus-id/connector-id/plane-id, confirmed via
 from __future__ import annotations
 
 import logging
+import os
 import subprocess
 from dataclasses import dataclass
 
@@ -30,6 +31,20 @@ logger = logging.getLogger(__name__)
 # letting the video branch drift seconds behind live -- see the
 # build_wfd_pipeline_description docstring for why this exists.
 VIDEO_QUEUE_MAX_TIME_NS = 200_000_000
+
+# Opt-in latency diagnosis, scoped to ONLY this pipeline's subprocess.
+# A 2026-07-15 attempt to trace where a ~5s lag came from set GST_DEBUG/
+# GST_TRACERS via `systemctl edit castd` -- a systemd Environment= line
+# applies to the whole unit, so it leaked into UxPlayProcess's subprocess
+# too (also a GStreamer app) and its trace lines came back mixed in with
+# the real target's, and separately that test's Miracast connection never
+# actually completed, so no real data came out of it either. Setting
+# CASTD_TRACE_RENDER_LATENCY=1 in castd's own environment is read here
+# and translated into GST_DEBUG/GST_TRACERS ONLY on the copy of the
+# environment handed to the WFD render subprocess -- castd's own os.environ
+# is never touched, so UxPlayProcess (which inherits from os.environ same
+# as always) sees nothing different.
+_TRACE_ENV_FLAG = "CASTD_TRACE_RENDER_LATENCY"
 
 
 @dataclass(frozen=True)
@@ -166,7 +181,13 @@ class RenderProcess:
         # error look like silent, inexplicable failure. Let stderr inherit
         # from this process (itself running under systemd) so it lands in
         # the journal automatically.
-        self._proc = subprocess.Popen(argv, stdout=subprocess.DEVNULL)
+        env = None
+        if os.environ.get(_TRACE_ENV_FLAG) == "1":
+            env = dict(os.environ)
+            env["GST_DEBUG"] = "GST_TRACER:7"
+            env["GST_TRACERS"] = "latency(flags=pipeline+element)"
+            logger.info("%s=1: tracing this render pipeline's latency", _TRACE_ENV_FLAG)
+        self._proc = subprocess.Popen(argv, stdout=subprocess.DEVNULL, env=env)
 
     def stop(self, *, timeout: float = 3.0) -> None:
         if self._proc is None:
