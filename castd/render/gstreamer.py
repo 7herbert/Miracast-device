@@ -103,7 +103,18 @@ def build_wfd_pipeline_description(*, udp_port: int, target: RenderTarget) -> st
     return (
         f"udpsrc port={udp_port} "
         f"! application/x-rtp,media=video,encoding-name=MP2T,payload=33,clock-rate=90000 "
-        f"! rtpjitterbuffer latency=100 "
+        # mode=0 (none): rtpjitterbuffer's default mode=slave tries to
+        # discipline the receiver's clock to the sender's via RTCP SR
+        # reports. There is no shared time source over this P2P link and
+        # this DIY-negotiated WFD source is not guaranteed to send
+        # regular RTCP SRs, and clock-skew "slaving" under those
+        # conditions is a known way for rtpjitterbuffer to grow delay
+        # that settles at a fixed multi-second value and stays there --
+        # matching a real session measured at a STABLE ~5s lag that two
+        # rounds of queue-sizing fixes did not move at all (2026-07-15).
+        # mode=none buffers purely off RTP timestamps/arrival time, no
+        # sender-clock discipline.
+        f"! rtpjitterbuffer latency=100 mode=0 "
         f"! rtpmp2tdepay "
         # tsdemux's latency property DEFAULTS TO 700 MS -- a deliberate
         # smooth-demuxing buffer paced by the TS PCR clock. Both sinks

@@ -53,6 +53,19 @@ def test_wfd_pipeline_jitter_buffer_never_drops_packets():
     assert "drop-on-latency" not in desc
 
 
+def test_wfd_pipeline_jitter_buffer_does_not_slave_to_sender_clock():
+    # mode=slave (the default) disciplines the receiver's clock to the
+    # sender's via RTCP SR. There is no shared time source over this P2P
+    # link, this DIY WFD source is not guaranteed to send regular RTCP
+    # SRs, and clock-skew slaving under those conditions is a known way
+    # to grow a fixed multi-second delay that settles and stays put --
+    # matching a real session stuck at a stable ~5s lag that two rounds
+    # of queue-sizing fixes did not move (2026-07-15). mode=0 (none)
+    # buffers purely off RTP timestamps/local arrival time.
+    desc = build_wfd_pipeline_description(udp_port=1028, target=RenderTarget())
+    assert "rtpjitterbuffer latency=100 mode=0" in desc
+
+
 def test_wfd_pipeline_overrides_tsdemux_700ms_default_latency():
     # tsdemux defaults to a 700 ms smooth-demuxing buffer -- the bulk of
     # a measured ~1 s glass-to-glass lag (2026-07-15). Useless here: both
