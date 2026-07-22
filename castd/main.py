@@ -49,7 +49,24 @@ from castd.wfdsink.session import RtspReader, listen_for_sources, negotiate, ope
 
 logger = logging.getLogger("castd")
 
-RECEIVER_CONF_PATH = Path("/boot/receiver.conf")
+# The config is meant to be editable by mounting the SD card's FAT boot
+# partition on any computer (see config.py). On Raspberry Pi OS Bookworm
+# that partition is mounted at /boot/firmware; only on older (Bullseye)
+# images is it at /boot. Try the Bookworm path first so editing the FAT
+# partition actually takes effect, and fall back to the legacy path.
+RECEIVER_CONF_CANDIDATES = (
+    Path("/boot/firmware/receiver.conf"),
+    Path("/boot/receiver.conf"),
+)
+
+
+def find_receiver_conf() -> Path:
+    for path in RECEIVER_CONF_CANDIDATES:
+        if path.exists():
+            return path
+    return RECEIVER_CONF_CANDIDATES[0]  # Bookworm default, for the not-found error
+
+
 IDLE_PNG_PATH = "/opt/castd/idle_screen.png"
 WFD_UDP_PORT = 1028
 
@@ -459,11 +476,13 @@ class CastDaemon:
 
 def main() -> int:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
+    conf_path = find_receiver_conf()
     try:
-        config = parse_room_config(RECEIVER_CONF_PATH.read_text())
+        config = parse_room_config(conf_path.read_text())
     except (ConfigError, OSError) as exc:
         logger.error("cannot start: %s", exc)
         return 1
+    logger.info("loaded room config from %s: room_name=%s", conf_path, config.room_name)
 
     daemon = CastDaemon(config)
     daemon.start()
