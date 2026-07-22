@@ -30,6 +30,34 @@ class FakeRenderProcess:
         self.calls.append("stop")
         self.is_running = False
 
+    def wait_for_first_frame(self, timeout: float) -> bool:
+        # Default fake is a healthy start: first frame arrives immediately, so
+        # the cold-start recovery thread returns without re-rolling.
+        return True
+
+
+class FakeRenderColdStart:
+    """Render fake whose wait_for_first_frame plays a scripted sequence of
+    True/False so the cold-start recovery loop can be tested deterministically
+    (no real threads or timing)."""
+
+    def __init__(self, frame_results: list[bool]) -> None:
+        self._results = list(frame_results)
+        self.is_running = True
+        self.starts = 0
+        self.stops = 0
+
+    def wait_for_first_frame(self, timeout: float) -> bool:
+        return self._results.pop(0) if self._results else True
+
+    def stop(self) -> None:
+        self.stops += 1
+        self.is_running = False
+
+    def start(self, pipeline_description: str) -> None:
+        self.starts += 1
+        self.is_running = True
+
 
 class FakeUxPlayProcess:
     def __init__(self, config=None, **kwargs) -> None:
@@ -85,6 +113,37 @@ def test_discovery_action_is_safe_before_p2p_is_up(monkeypatch):
     daemon = make_daemon(monkeypatch)
     assert getattr(daemon, "p2p", None) is None
     daemon._apply_actions((Action.PAUSE_MIRACAST_DISCOVERY,))  # must not raise
+
+
+def test_render_recovery_rerolls_a_frozen_pipeline_then_succeeds(monkeypatch):
+    # ~15% of connects cold-start-freeze (no first frame). The recovery loop
+    # must re-roll the render pipeline and stop once a frame finally appears.
+    daemon = make_daemon(monkeypatch)
+    daemon.arbiter.handle(Event.MIRACAST_CONNECTED)  # -> MIRACAST
+    daemon._render_pipeline_expected = True
+    daemon.render = FakeRenderColdStart([False, True])  # froze once, then OK
+    daemon._recover_render_cold_start("pipe")
+    assert daemon.render.starts == 1 and daemon.render.stops == 1  # exactly one re-roll
+
+
+def test_render_recovery_gives_up_after_max_retries(monkeypatch):
+    daemon = make_daemon(monkeypatch)
+    daemon.arbiter.handle(Event.MIRACAST_CONNECTED)
+    daemon._render_pipeline_expected = True
+    daemon.render = FakeRenderColdStart([False, False, False, False])  # never recovers
+    daemon._recover_render_cold_start("pipe")
+    assert daemon.render.starts == main_module.RENDER_COLD_START_RETRIES  # bounded, no infinite loop
+
+
+def test_render_recovery_bails_when_session_already_ended(monkeypatch):
+    # If the source disconnected during the freeze window, recovery must not
+    # re-roll (which would resurrect a render pipeline after teardown).
+    daemon = make_daemon(monkeypatch)
+    assert daemon.arbiter.state is State.IDLE  # not in a session
+    daemon._render_pipeline_expected = True
+    daemon.render = FakeRenderColdStart([False])
+    daemon._recover_render_cold_start("pipe")
+    assert daemon.render.starts == 0
 
 
 def test_module_imports_cleanly():

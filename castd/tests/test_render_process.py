@@ -117,3 +117,12 @@ def test_drain_output_does_not_false_trigger_on_decoder_input_caps():
     rp = RenderProcess()
     rp._drain_output(_FakeProc([_DECODER_INPUT_CAPS, "Setting pipeline to PLAYING ...\n"]), 0.0)
     assert not rp.first_frame_seen
+
+
+def test_wait_for_first_frame_reflects_the_marker():
+    # Drives the signal main.py's cold-start recovery polls: False until a
+    # frame reaches the sink, True once it does.
+    rp = RenderProcess()
+    assert rp.wait_for_first_frame(0.01) is False
+    rp._drain_output(_FakeProc([_KMS_SINK_CAPS]), 0.0)
+    assert rp.wait_for_first_frame(0.01) is True

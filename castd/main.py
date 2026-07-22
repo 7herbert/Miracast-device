@@ -69,6 +69,10 @@ def find_receiver_conf() -> Path:
 
 IDLE_PNG_PATH = "/opt/castd/idle_screen.png"
 WFD_UDP_PORT = 1028
+# How many times to re-roll a render pipeline that cold-start-froze (no first
+# frame). Each re-roll has ~85% chance of clearing the race, so 3 drives the
+# residual freeze rate from ~15% to well under 1%.
+RENDER_COLD_START_RETRIES = 3
 
 
 class CastDaemon:
@@ -429,18 +433,70 @@ class CastDaemon:
             session = negotiate(
                 sock, source_ip=source_ip, capabilities=negotiator.capabilities, negotiator=negotiator, reader=reader
             )
+            pipeline = build_wfd_pipeline_description(udp_port=WFD_UDP_PORT, target=self.render_target)
             self.render.stop()
-            self.render.start(build_wfd_pipeline_description(udp_port=WFD_UDP_PORT, target=self.render_target))
+            self.render.start(pipeline)
             # Only from this point on has the stream watchdog's "is the
             # render process still running" check earned any meaning --
             # see _stream_watch_loop for why this flag exists at all.
             self._render_pipeline_expected = True
             logger.info("Miracast streaming started, session=%s", session.session_id)
+            # The Pi's H.264 decoder intermittently cold-starts without ever
+            # emitting a first frame (~15% of connects, 2026-07-22), leaving
+            # the screen on the PIN until a manual reconnect. Recover it
+            # automatically in the background so this handler can return and
+            # start pumping RTSP keep-alives immediately (blocking here would
+            # risk the source tearing the session down).
+            threading.Thread(
+                target=self._recover_render_cold_start, args=(pipeline,), daemon=True
+            ).start()
             return negotiator
         except (NegotiationError, OSError):
             logger.exception("Miracast negotiation failed for %s", source_ip)
             self.handle_miracast_disconnected()
             return None
+
+    def _recover_render_cold_start(self, pipeline_description: str) -> None:
+        """Auto-recover the intermittent decoder cold-start freeze: if no
+        decoded frame reaches kmssink within FIRST_FRAME_TIMEOUT_S, re-roll
+        the LOCAL render pipeline. The RTSP session with the source stays up,
+        so this is invisible beyond a couple extra seconds on the idle screen
+        -- it does automatically what a manual reconnect used to. Bounded,
+        and it bows out the moment the session ends or the render process is
+        already gone, so it never fights a teardown or loops on a genuinely
+        dead pipeline. Runs in its own thread so it never delays the RTSP
+        keep-alive pump.
+
+        NOTE: a re-rolled pipeline must wait for the source's next IDR before
+        it can show a frame; Windows sends them frequently enough that the
+        timeout covers it. If field data shows re-rolls timing out purely for
+        lack of an IDR, add an RTSP wfd-idr-request after the restart."""
+        timeout = RenderProcess.FIRST_FRAME_TIMEOUT_S
+        for attempt in range(1, RENDER_COLD_START_RETRIES + 1):
+            if self.render.wait_for_first_frame(timeout):
+                if attempt > 1:
+                    logger.info("render recovered after %d cold-start re-roll(s)", attempt - 1)
+                return
+            if self.arbiter.state is not State.MIRACAST or not self._render_pipeline_expected:
+                return  # session ended; nothing to recover
+            if not self.render.is_running:
+                return  # a teardown/watchdog already took the pipeline down
+            logger.warning(
+                "render cold-start freeze: no frame in %.0fs; re-rolling render pipeline (%d/%d)",
+                timeout, attempt, RENDER_COLD_START_RETRIES,
+            )
+            # Drop the watchdog gate across the brief stop/start so the stream
+            # watchdog can't read the gap as "render process died".
+            self._render_pipeline_expected = False
+            self.render.stop()
+            if self.arbiter.state is not State.MIRACAST:
+                return  # disconnected during teardown -- do not resurrect render
+            self.render.start(pipeline_description)
+            self._render_pipeline_expected = True
+        logger.error(
+            "render still frozen after %d re-rolls; leaving it to the stream watchdog",
+            RENDER_COLD_START_RETRIES,
+        )
 
     def handle_miracast_disconnected(self) -> None:
         with self._lock:

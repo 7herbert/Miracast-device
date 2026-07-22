@@ -196,7 +196,6 @@ class RenderProcess:
     def __init__(self) -> None:
         self._proc: subprocess.Popen | None = None
         self._reader: threading.Thread | None = None
-        self._monitor: threading.Thread | None = None
         self._first_frame = threading.Event()
 
     @property
@@ -246,8 +245,6 @@ class RenderProcess:
             target=self._drain_output, args=(self._proc, time.monotonic()), daemon=True
         )
         self._reader.start()
-        self._monitor = threading.Thread(target=self._watch_first_frame, args=(self._proc,), daemon=True)
-        self._monitor.start()
 
     def _drain_output(self, proc: subprocess.Popen, started_at: float) -> None:
         """Drain the child's -v output line by line (an unread pipe that
@@ -271,20 +268,12 @@ class RenderProcess:
         except (ValueError, OSError):
             pass  # pipe closed on stop()
 
-    def _watch_first_frame(self, proc: subprocess.Popen) -> None:
-        """Flag the intermittent cold-start freeze: if no decoded frame
-        reaches kmssink within the timeout while the pipeline is still up,
-        the screen is stuck on idle and (today) needs a reconnect to
-        re-roll. Observability only -- no auto-recovery yet; this makes the
-        freeze countable in the journal during stress/soak runs."""
-        if self._first_frame.wait(timeout=self.FIRST_FRAME_TIMEOUT_S):
-            return
-        if proc.poll() is None and self._proc is proc:
-            logger.warning(
-                "render: NO video frame reached kmssink within %.0fs of start -- "
-                "cold-start freeze (screen stuck on idle); a reconnect re-rolls it",
-                self.FIRST_FRAME_TIMEOUT_S,
-            )
+    def wait_for_first_frame(self, timeout: float) -> bool:
+        """Block up to `timeout` seconds for a decoded frame to reach
+        kmssink. Returns True if one did, False if the pipeline is stuck in
+        the intermittent cold-start freeze. main.py uses this to auto-restart
+        (re-roll) a frozen pipeline while the RTSP session stays up."""
+        return self._first_frame.wait(timeout=timeout)
 
     def stop(self, *, timeout: float = 3.0) -> None:
         if self._proc is None:
@@ -298,5 +287,4 @@ class RenderProcess:
             self._proc.wait(timeout=timeout)
         self._proc = None
         self._reader = None
-        self._monitor = None
         self._first_frame.clear()
