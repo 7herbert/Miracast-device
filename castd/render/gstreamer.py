@@ -53,10 +53,20 @@ class RenderTarget:
     height: int = 1080
 
 
-def build_wfd_pipeline_description(*, udp_port: int, target: RenderTarget) -> str:
+def build_wfd_pipeline_description(
+    *,
+    udp_port: int,
+    target: RenderTarget,
+    video_queue: str = "queue",
+    video_decode: str = "v4l2h264dec ! v4l2convert",
+) -> str:
     """gst-launch-1.0 style pipeline string for a Miracast/WFD MPEG-TS/H.264
     stream arriving over RTP on `udp_port`. v4l2h264dec uses the Pi 4's
     hardware decoder; kmssink writes straight to the DRM plane.
+
+    video_queue / video_decode default to the production elements and are
+    overridden only by the diagnostic variants in wfd_variant_params (see
+    there) while localizing the video-branch-only ~5s lag (2026-07-22).
 
     Two lessons this string encodes from real hardware (2026-07-14):
       * clock-rate=90000 is mandatory in the udpsrc caps -- RTP caps must
@@ -131,14 +141,48 @@ def build_wfd_pipeline_description(*, udp_port: int, target: RenderTarget) -> st
         # glass-to-glass lag measured against real Windows mirroring
         # (2026-07-15).
         f"! tsdemux name=demux latency=50 "
-        f"demux. ! queue ! h264parse "
+        f"demux. ! {video_queue} ! h264parse "
         f"! capssetter join=true replace=false caps=video/x-h264,profile=(string)high "
-        f"! v4l2h264dec ! v4l2convert "
+        f"! {video_decode} "
         f"! video/x-raw,width={target.width},height={target.height},pixel-aspect-ratio=1/1 "
         f"! kmssink driver-name={target.driver_name}{connector} sync=false "
         f"demux. ! queue leaky=downstream ! aacparse ! avdec_aac ! audioconvert ! audioresample "
         f"! alsasink sync=false"
     )
+
+
+# Diagnostic pipeline variants, selected by the CASTD_WFD_VARIANT env var
+# (mapped in main.py). The 2026-07-22 latency picture: audio is instant
+# while video lags a FIXED ~5s from the first frame, so the delay is not in
+# the shared upstream (jitterbuffer/tsdemux -- those would delay audio too)
+# but in one video-branch element after the tsdemux split. The GStreamer
+# latency tracer can't measure it here (its per-buffer instrumentation
+# starves this Pi's realtime decode path and freezes every session at frame
+# one -- confirmed twice), so instead each variant swaps exactly ONE
+# suspect element and a glass-to-glass A/B says which one holds the 5s.
+# All variants are non-destructive and revert to production by unsetting
+# the env var; the winning finding gets baked in as the default afterwards.
+_WFD_VARIANTS: dict[str, dict[str, str]] = {
+    # Production. Plain unbounded queue + Pi 4 hardware decode/convert.
+    "default": {},
+    # Bound the compressed video queue. Non-leaky: it only ever BLOCKS,
+    # never drops, so it cannot lose an SPS/PPS buffer the way the reverted
+    # leaky experiment could. If the fixed 5s collapses, the plain queue
+    # was silently sitting full of a multi-second backlog (its 200-buffer
+    # default ceiling is ~6s at 30fps whenever the time limit is inactive).
+    "qcap": {"video_queue": "queue max-size-buffers=8 max-size-bytes=0 max-size-time=0"},
+    # Software decode+convert instead of the V4L2 hardware path. 1080p30 in
+    # software may drop frames on a Pi 4, but if the fixed 5s vanishes even
+    # so, the hardware decoder (or the ISP convert) was imposing it.
+    "swdec": {"video_decode": "avdec_h264 ! videoconvert ! videoscale"},
+}
+
+
+def wfd_variant_params(name: str) -> dict[str, str]:
+    """Map a CASTD_WFD_VARIANT name to build_wfd_pipeline_description kwargs.
+    Unknown names fall back to production so a typo in an env override can
+    never wedge the receiver -- it just streams normally."""
+    return _WFD_VARIANTS.get(name, {})
 
 
 # NOTE: the idle screen deliberately does NOT go through this module any

@@ -1,7 +1,7 @@
 """Tests for the pure pipeline-string builders in castd.render.gstreamer.
 No GStreamer required -- these lock in wire-format details that real
 hardware proved fatal when wrong."""
-from castd.render.gstreamer import RenderTarget, build_wfd_pipeline_description
+from castd.render.gstreamer import RenderTarget, build_wfd_pipeline_description, wfd_variant_params
 
 
 def test_wfd_pipeline_rtp_caps_are_fully_fixed():
@@ -105,6 +105,38 @@ def test_wfd_pipeline_audio_branch_cannot_backpressure_video():
     desc = build_wfd_pipeline_description(udp_port=1028, target=RenderTarget())
     assert "queue leaky=downstream ! aacparse" in desc
     assert "audioconvert ! audioresample ! alsasink sync=false" in desc
+
+
+def test_default_variant_is_production_pipeline():
+    # An unset/unknown CASTD_WFD_VARIANT must never change the shipped
+    # pipeline -- a typo in an env override cannot be allowed to wedge the
+    # receiver, so it falls back to exactly the production string.
+    prod = build_wfd_pipeline_description(udp_port=1028, target=RenderTarget())
+    assert wfd_variant_params("default") == {}
+    assert wfd_variant_params("nonsense-typo") == {}
+    assert build_wfd_pipeline_description(udp_port=1028, target=RenderTarget(), **wfd_variant_params("default")) == prod
+
+
+def test_qcap_variant_bounds_the_video_queue_without_leaking():
+    # Diagnostic (2026-07-22): does the plain video queue silently hold the
+    # fixed ~5s? Bound it -- but non-leaky, so it can only block, never drop
+    # an SPS/PPS buffer (the trap the reverted leaky experiment fell into).
+    desc = build_wfd_pipeline_description(udp_port=1028, target=RenderTarget(), **wfd_variant_params("qcap"))
+    assert "demux. ! queue max-size-buffers=8 max-size-bytes=0 max-size-time=0 ! h264parse" in desc
+    # The video branch (between the two demux. tees) must carry no leaky=;
+    # only the audio branch (the last tee) is allowed to be leaky.
+    video_branch = desc.split("demux.")[1]
+    assert "leaky" not in video_branch
+    assert "v4l2h264dec ! v4l2convert" in desc  # decoder path untouched by this variant
+
+
+def test_swdec_variant_swaps_hardware_decode_for_software():
+    # Diagnostic (2026-07-22): if the fixed ~5s survives software decode,
+    # the V4L2 hardware decoder/convert was not the element holding it.
+    desc = build_wfd_pipeline_description(udp_port=1028, target=RenderTarget(), **wfd_variant_params("swdec"))
+    assert "avdec_h264 ! videoconvert ! videoscale" in desc
+    assert "v4l2h264dec" not in desc
+    assert "demux. ! queue ! h264parse" in desc  # queue path untouched by this variant
 
 
 def test_no_idle_pipeline_builder_exists():
