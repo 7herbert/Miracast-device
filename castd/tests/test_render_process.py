@@ -21,9 +21,11 @@ from castd.render.gstreamer import RenderProcess
 
 
 class FakePopen:
-    def __init__(self, argv, stdout=None, env=None):
+    def __init__(self, argv, **kwargs):
         self.argv = argv
-        self.env = env
+        self.env = kwargs.get("env")
+        # start() drains stdout in a reader thread; None makes that a no-op.
+        self.stdout = None
         self._returncode = None
 
     def poll(self):
@@ -43,8 +45,8 @@ class FakePopen:
 def fake_popen(monkeypatch):
     calls = []
 
-    def fake(argv, stdout=None, env=None):
-        proc = FakePopen(argv, stdout=stdout, env=env)
+    def fake(argv, **kwargs):
+        proc = FakePopen(argv, **kwargs)
         calls.append(proc)
         return proc
 

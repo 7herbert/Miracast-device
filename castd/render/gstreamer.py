@@ -23,6 +23,7 @@ from __future__ import annotations
 import logging
 import os
 import subprocess
+import threading
 from dataclasses import dataclass
 
 logger = logging.getLogger(__name__)
@@ -181,6 +182,7 @@ class RenderProcess:
 
     def __init__(self) -> None:
         self._proc: subprocess.Popen | None = None
+        self._reader: threading.Thread | None = None
 
     @property
     def is_running(self) -> bool:
@@ -189,23 +191,51 @@ class RenderProcess:
     def start(self, pipeline_description: str) -> None:
         if self.is_running:
             raise RuntimeError("a render pipeline is already running; stop() it first")
-        argv = ["gst-launch-1.0", "-e"] + pipeline_description.split()
+        # -v so gst-launch prints pad-caps events. v4l2h264dec's src caps
+        # (and therefore kmssink's sink caps) only get negotiated AFTER the
+        # decoder produces its first frame, so that caps line is a reliable
+        # "first frame decoded" marker -- the signal we need to detect the
+        # intermittent cold-start freeze (2026-07-22, connects sometimes
+        # stall with no first frame and need a re-roll). stdbuf -oL forces
+        # line buffering: gst-launch block-buffers stdout when it is a pipe
+        # (same trap as uxplay), which would hide the marker until too late.
+        argv = ["stdbuf", "-oL", "-eL", "gst-launch-1.0", "-e", "-v"] + pipeline_description.split()
         logger.info("starting render pipeline: %s", pipeline_description)
-        # stderr=subprocess.PIPE with nothing ever reading it was a real bug:
-        # gst-launch-1.0 failing immediately (e.g. the "no property 'device'
-        # in element kmssink" pipeline error found on real hardware) produced
-        # a defunct/zombie process with its error text sitting unread in the
-        # pipe -- invisible in journalctl, making a real, fatal pipeline
-        # error look like silent, inexplicable failure. Let stderr inherit
-        # from this process (itself running under systemd) so it lands in
-        # the journal automatically.
         env = None
         if os.environ.get(_TRACE_ENV_FLAG) == "1":
             env = dict(os.environ)
             env["GST_DEBUG"] = "GST_TRACER:7"
             env["GST_TRACERS"] = "latency(flags=pipeline+element)"
             logger.info("%s=1: tracing this render pipeline's latency", _TRACE_ENV_FLAG)
-        self._proc = subprocess.Popen(argv, stdout=subprocess.DEVNULL, env=env)
+        # stdout is read by a thread below; stderr is folded in so gst-launch
+        # errors land in the same stream. An unread PIPE that fills up
+        # deadlocks/zombies the child (a bug this code hit before), so the
+        # reader must always drain it.
+        self._proc = subprocess.Popen(
+            argv,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            errors="replace",
+            bufsize=1,
+            env=env,
+        )
+        self._reader = threading.Thread(target=self._drain_output, args=(self._proc,), daemon=True)
+        self._reader.start()
+
+    def _drain_output(self, proc: subprocess.Popen) -> None:
+        """Drain the child's -v output line by line so its pipe never fills.
+        For now every line is logged (to capture the exact 'first frame
+        decoded' caps marker on real hardware); marker detection for
+        cold-start-freeze auto-recovery will hook in here next."""
+        stream = proc.stdout
+        if stream is None:
+            return
+        try:
+            for line in stream:
+                logger.info("gstout: %s", line.rstrip())
+        except (ValueError, OSError):
+            pass  # pipe closed on stop()
 
     def stop(self, *, timeout: float = 3.0) -> None:
         if self._proc is None:
@@ -218,3 +248,4 @@ class RenderProcess:
             self._proc.kill()
             self._proc.wait(timeout=timeout)
         self._proc = None
+        self._reader = None
