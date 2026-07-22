@@ -1,0 +1,27 @@
+Miracast + AirPlay Meeting Room Receiver (castd)
+Copyright 2026 The castd authors
+
+Licensed under the Apache License, Version 2.0 (the "License"); you may not
+use this file except in compliance with the License. You may obtain a copy
+of the License at http://www.apache.org/licenses/LICENSE-2.0
+
+--------------------------------------------------------------------------
+
+Third-party software invoked at runtime AS SEPARATE PROCESSES (not linked
+into castd), each under its own license:
+
+  * UxPlay            GPLv3       AirPlay mirroring server (spawned via the
+                                  `uxplay` binary)
+  * GStreamer + plugins  LGPL-2.1 / GPL   media pipeline (spawned via the
+                                  `gst-launch-1.0` binary)
+  * wpa_supplicant    BSD-3-Clause  Wi-Fi Direct / P2P Group Owner
+                                  (controlled over D-Bus)
+  * dnsmasq           GPLv2 / GPLv3  DHCP for the P2P group (spawned as a
+                                  child process)
+
+castd calls these at arm's length (exec / D-Bus / IPC), so castd itself is
+not a derivative work of any of them and is distributed under Apache-2.0.
+If you redistribute a full system image that BUNDLES these binaries, you
+must comply with their respective licenses (in particular UxPlay's GPLv3
+source-availability requirement). Internal use within an organization is
+not distribution and does not trigger those obligations.

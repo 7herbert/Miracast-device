@@ -253,3 +253,15 @@ zero health outages, flat castd RSS, anomaly count 0.
 1. Audio validation on both protocols (HDMI output)
 2. 72-hour soak (procedure above) before multi-room deployment
 3. Idle-screen QR code for one-scan AirPlay joining; read-only rootfs
+
+## License
+
+castd is licensed under the **Apache License 2.0** — see [LICENSE](LICENSE).
+
+It invokes UxPlay (GPLv3), GStreamer (LGPL/GPL), wpa_supplicant (BSD), and
+dnsmasq (GPL) as **separate processes** (exec / D-Bus), not linked in, so
+castd itself is not a derivative work of them and its Apache-2.0 license
+stands on its own. Those components keep their own licenses — see
+[NOTICE](NOTICE). If you redistribute a full system image bundling those
+binaries, comply with their licenses (notably UxPlay's GPLv3); internal
+use within an organization is not distribution.
