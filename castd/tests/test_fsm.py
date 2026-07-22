@@ -7,6 +7,9 @@ def test_idle_to_miracast_pauses_airplay_advertising():
     assert t.next_state is State.MIRACAST
     assert arb.state is State.MIRACAST
     assert Action.PAUSE_AIRPLAY_ADVERTISING in t.actions
+    # Also hide Miracast from a SECOND Windows so it can't interrupt the
+    # person presenting (WFD IE flipped to busy -- see main._apply_actions).
+    assert Action.PAUSE_MIRACAST_DISCOVERY in t.actions
     # Render pipeline start is NOT an FSM action: it only happens after WFD
     # negotiation yields a real port (see castd.main.handle_miracast_connected).
 
@@ -43,6 +46,7 @@ def test_miracast_disconnect_returns_to_idle_and_resumes_airplay():
     t = arb.handle(Event.MIRACAST_DISCONNECTED)
     assert t.next_state is State.IDLE
     assert Action.RESUME_AIRPLAY_ADVERTISING in t.actions
+    assert Action.RESUME_MIRACAST_DISCOVERY in t.actions  # room becomes available again
     assert Action.STOP_RENDER_PIPELINE in t.actions
     assert Action.SHOW_IDLE_SCREEN in t.actions
 

@@ -255,13 +255,32 @@ class P2PGroupOwner:
         # name/type against a real wpa_supplicant build, so it is not
         # attempted here.
 
-        wfd_bytes = build_wfd_ies()
+        self._publish_wfd_ies(available_for_session=True)
+
+    def _publish_wfd_ies(self, *, available_for_session: bool) -> None:
+        """(Re)publish the global WFDIEs blob. The availability flag inside
+        it is what sources read during discovery to decide whether this sink
+        can take a new session."""
+        wfd_bytes = build_wfd_ies(available_for_session=available_for_session)
         wfd_dbus_array = dbus.Array(
             [dbus.Byte(b) for b in to_dbus_byte_array(wfd_bytes)], signature=dbus.Signature("y")
         )
         dbus.Interface(self.wpas_obj, dbus_interface=dbus.PROPERTIES_IFACE).Set(
             WPAS_SERVICE, "WFDIEs", wfd_dbus_array
         )
+
+    def set_session_available(self, available: bool) -> None:
+        """Advertise this sink as available / busy for a NEW Miracast session
+        by re-publishing the WFD IE with the Session Availability field set
+        accordingly. Called when a session starts (busy) and ends (available)
+        so a second source sees the room as occupied rather than being able
+        to interrupt the person already presenting. Does not touch the active
+        group, so the connected client is unaffected."""
+        logger.info("advertising Miracast session availability = %s", available)
+        try:
+            self._publish_wfd_ies(available_for_session=available)
+        except dbus.DBusException:
+            logger.exception("could not update WFDIEs availability to %s", available)
 
     def _existing_group_interface(self) -> str | None:
         """Detect an already-running P2P group via /sys/class/net instead of

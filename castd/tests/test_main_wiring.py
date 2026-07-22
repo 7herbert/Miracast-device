@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import castd.main as main_module
 from castd.config import RoomConfig
-from castd.fsm.state_machine import Event, State
+from castd.fsm.state_machine import Action, Event, State
 from castd.stream_watchdog import StreamWatchdog
 from castd.wfdsink.rtsp import WfdSessionParams
 
@@ -59,6 +59,32 @@ def make_daemon(monkeypatch) -> main_module.CastDaemon:
     daemon.render = FakeRenderProcess()
     daemon.uxplay = FakeUxPlayProcess()
     return daemon
+
+
+class FakeP2P:
+    def __init__(self) -> None:
+        self.availability_calls: list[bool] = []
+
+    def set_session_available(self, available: bool) -> None:
+        self.availability_calls.append(available)
+
+
+def test_pause_resume_miracast_discovery_toggles_wfd_availability(monkeypatch):
+    # The "hide the room while someone's presenting" feature: PAUSE flips
+    # the WFD IE to busy (False), RESUME back to available (True).
+    daemon = make_daemon(monkeypatch)
+    daemon.p2p = FakeP2P()
+    daemon._apply_actions((Action.PAUSE_MIRACAST_DISCOVERY,))
+    daemon._apply_actions((Action.RESUME_MIRACAST_DISCOVERY,))
+    assert daemon.p2p.availability_calls == [False, True]
+
+
+def test_discovery_action_is_safe_before_p2p_is_up(monkeypatch):
+    # _apply_actions can run before start() has created self.p2p; the
+    # defensive getattr must make this a no-op rather than an AttributeError.
+    daemon = make_daemon(monkeypatch)
+    assert getattr(daemon, "p2p", None) is None
+    daemon._apply_actions((Action.PAUSE_MIRACAST_DISCOVERY,))  # must not raise
 
 
 def test_module_imports_cleanly():

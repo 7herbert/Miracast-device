@@ -445,11 +445,14 @@ class CastDaemon:
             elif action is Action.FORCE_TEARDOWN_AIRPLAY:
                 logger.warning("watchdog timeout: forcing AirPlay teardown")
             elif action in (Action.PAUSE_MIRACAST_DISCOVERY, Action.RESUME_MIRACAST_DISCOVERY):
-                # Phase 2 gap: pausing P2P discoverability while AirPlay is
-                # presenting needs a wpa_supplicant D-Bus call not yet
-                # implemented in p2p/dbus_go.py. Logged explicitly instead
-                # of silently dropped so this doesn't look "handled".
-                logger.info("%s requested but not yet implemented", action.name)
+                # Flip the WFD Session Availability flag so a second source
+                # sees the room as busy while someone is presenting (paused),
+                # and available again once they leave (resumed). This only
+                # re-publishes the discovery IE; it does not touch the active
+                # group, so the current client is unaffected.
+                p2p = getattr(self, "p2p", None)
+                if p2p is not None:
+                    p2p.set_session_available(action is Action.RESUME_MIRACAST_DISCOVERY)
         self.health.set_state(self.arbiter.state)
         self.health.heartbeat()
 

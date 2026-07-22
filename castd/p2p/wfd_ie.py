@@ -81,13 +81,22 @@ def build_coupled_sink_subelement() -> bytes:
     return bytes([6]) + len(payload).to_bytes(2, "big") + payload
 
 
-def build_wfd_ies(*, control_port: int = 7236, max_throughput_mbps: int = 50) -> bytes:
+def build_wfd_ies(
+    *, control_port: int = 7236, max_throughput_mbps: int = 50, available_for_session: bool = True
+) -> bytes:
     """Full WFDIEs blob as consumed by wpa_supplicant's global 'WFDIEs'
     D-Bus property (a plain byte array, no vendor-IE 0xDD/OUI wrapper --
-    wpa_supplicant adds that framing itself when it beacons)."""
+    wpa_supplicant adds that framing itself when it beacons).
+
+    available_for_session=False flips the WFD Session Availability field to
+    "not available", the spec signal that tells sources this sink is busy
+    and must not be offered a new session -- re-published while a session is
+    active so a second Windows/iPhone doesn't try to barge into an occupied
+    room, then restored on disconnect."""
     return build_device_info_subelement(
         control_port=control_port,
         max_throughput_mbps=max_throughput_mbps,
+        available_for_session=available_for_session,
     ) + build_coupled_sink_subelement()
 
 

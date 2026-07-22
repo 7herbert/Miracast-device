@@ -79,7 +79,11 @@ _TABLE: dict[tuple[State, Event], Transition] = {
     # successful negotiate() call rather than the FSM triggering it blind.
     (State.IDLE, Event.MIRACAST_CONNECTED): Transition(
         State.MIRACAST,
-        (Action.PAUSE_AIRPLAY_ADVERTISING,),
+        # PAUSE_AIRPLAY_ADVERTISING stops uxplay so an iPhone can't barge in;
+        # PAUSE_MIRACAST_DISCOVERY flips the WFD IE to "busy" so a SECOND
+        # Windows sees the room as occupied instead of interrupting the
+        # person presenting. Both restored on MIRACAST_DISCONNECTED.
+        (Action.PAUSE_AIRPLAY_ADVERTISING, Action.PAUSE_MIRACAST_DISCOVERY),
     ),
     # UxPlay owns its own GStreamer pipeline once a client connects (see
     # airplay/uxplay.py's -vs kmssink); the only thing this sink needs to do
@@ -91,7 +95,12 @@ _TABLE: dict[tuple[State, Event], Transition] = {
     ),
     (State.MIRACAST, Event.MIRACAST_DISCONNECTED): Transition(
         State.IDLE,
-        (Action.STOP_RENDER_PIPELINE, Action.RESUME_AIRPLAY_ADVERTISING, Action.SHOW_IDLE_SCREEN),
+        (
+            Action.STOP_RENDER_PIPELINE,
+            Action.RESUME_AIRPLAY_ADVERTISING,
+            Action.RESUME_MIRACAST_DISCOVERY,
+            Action.SHOW_IDLE_SCREEN,
+        ),
     ),
     (State.MIRACAST, Event.WATCHDOG_TIMEOUT): Transition(
         State.IDLE,
@@ -99,6 +108,7 @@ _TABLE: dict[tuple[State, Event], Transition] = {
             Action.FORCE_TEARDOWN_MIRACAST,
             Action.STOP_RENDER_PIPELINE,
             Action.RESUME_AIRPLAY_ADVERTISING,
+            Action.RESUME_MIRACAST_DISCOVERY,
             Action.SHOW_IDLE_SCREEN,
         ),
     ),

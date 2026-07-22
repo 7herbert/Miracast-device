@@ -34,6 +34,19 @@ def test_device_info_defaults_to_primary_sink_and_available():
     assert bitmap & (1 << 4)  # WFD_AVAILABLE_FOR_SESSION
 
 
+def test_build_wfd_ies_can_advertise_busy():
+    # available_for_session=False is how a session-in-progress tells a
+    # second source the room is occupied (WFD Session Availability field
+    # = 00). The device-info subelement is first in the blob; its bitmap
+    # is bytes [3:5].
+    available = build_wfd_ies(available_for_session=True)
+    busy = build_wfd_ies(available_for_session=False)
+    assert (int.from_bytes(available[3:5], "big") >> 4) & 0b11 == 0b01  # available
+    assert (int.from_bytes(busy[3:5], "big") >> 4) & 0b11 == 0b00  # busy
+    # Only the availability field differs; port/throughput/coupled-sink stay.
+    assert available[5:] == busy[5:]
+
+
 def test_session_availability_field_is_exactly_01_not_reserved():
     # Bits 4-5 are ONE two-bit field: 01 = available, 11 = reserved. A
     # previous revision set both bits (mislabeling bit 5) and a real
