@@ -139,6 +139,17 @@ def test_swdec_variant_swaps_hardware_decode_for_software():
     assert "demux. ! queue ! h264parse" in desc  # queue path untouched by this variant
 
 
+def test_swconv_variant_keeps_hardware_decode_but_software_converts():
+    # Diagnostic (2026-07-22): qcap cleared the queue and full swdec was too
+    # heavy to flow, so isolate the last two suspects -- keep hardware
+    # v4l2h264dec, move only the format-convert to software. If the fixed
+    # ~5s vanishes, v4l2convert held it; if it survives, the decoder does.
+    desc = build_wfd_pipeline_description(udp_port=1028, target=RenderTarget(), **wfd_variant_params("swconv"))
+    assert "v4l2h264dec ! videoconvert ! videoscale" in desc
+    assert "v4l2convert" not in desc
+    assert "demux. ! queue ! h264parse" in desc  # queue path untouched
+
+
 def test_no_idle_pipeline_builder_exists():
     # The idle screen must never be a kmssink pipeline again: it holds DRM
     # master and starves UxPlay's startup-time kmssink (2026-07-15). It is

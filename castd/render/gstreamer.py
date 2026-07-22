@@ -174,7 +174,17 @@ _WFD_VARIANTS: dict[str, dict[str, str]] = {
     # Software decode+convert instead of the V4L2 hardware path. 1080p30 in
     # software may drop frames on a Pi 4, but if the fixed 5s vanishes even
     # so, the hardware decoder (or the ISP convert) was imposing it.
+    # RESULT 2026-07-22: too heavy to flow at all (black/frozen), so it gave
+    # no latency verdict -- superseded by swconv, which keeps hardware decode
+    # and only moves the (lighter) format-convert to software.
     "swdec": {"video_decode": "avdec_h264 ! videoconvert ! videoscale"},
+    # Keep the Pi's HARDWARE H.264 decode, but replace the V4L2 ISP convert
+    # (v4l2convert) with software videoconvert. Splits the two remaining
+    # suspects: qcap already cleared the queue, and the source is 1080p30 ==
+    # the 1920x1080 output target so the convert only reformats (no scaling),
+    # which software can sustain. If the fixed 5s vanishes here, v4l2convert
+    # held it; if it survives, v4l2h264dec itself is the holder.
+    "swconv": {"video_decode": "v4l2h264dec ! videoconvert ! videoscale"},
 }
 
 
