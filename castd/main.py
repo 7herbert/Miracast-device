@@ -27,6 +27,7 @@ Still needs real Pi/Windows/iPhone hardware before this is trusted:
 from __future__ import annotations
 
 import logging
+import os
 import sys
 import threading
 import time
@@ -89,8 +90,15 @@ class CastDaemon:
         sdnotify.notify(ready=True, status="idle")
         threading.Thread(target=self._watchdog_heartbeat_loop, daemon=True).start()
 
+        # Which radio hosts the P2P Group Owner. Defaults to the external
+        # adapter (wlan1). CASTD_P2P_INTERFACE overrides it -- used to A/B
+        # the Pi 4's built-in wlan0 against the external card without
+        # editing code (2026-07-22: testing whether the built-in brcmfmac
+        # chip can host a reliable Miracast GO and let us drop the dongle).
+        p2p_ifname = os.environ.get("CASTD_P2P_INTERFACE", "wlan1")
+        logger.info("bringing up P2P Group Owner on %s", p2p_ifname)
         self.p2p = P2PGroupOwner(
-            "wlan1",
+            p2p_ifname,
             device_name=self.config.device_name,
             freq_mhz=self.config.freq_mhz,
             on_group_started=self._on_group_started,
@@ -103,7 +111,7 @@ class CastDaemon:
 
         group_ifname = self.p2p.get_group_interface_name()
         if group_ifname is None:
-            raise RuntimeError("start_group() returned but no p2p-wlan1-* interface exists")
+            raise RuntimeError(f"start_group() returned but no p2p-{p2p_ifname}-* interface exists")
         # Covers BOTH startup paths: fresh GroupAdd (GroupStarted will also
         # fire and call this again, harmlessly -- both pieces are
         # idempotent) and castd restarting against a group that already
