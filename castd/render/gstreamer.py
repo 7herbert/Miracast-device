@@ -24,6 +24,7 @@ import logging
 import os
 import subprocess
 import threading
+import time
 from dataclasses import dataclass
 
 logger = logging.getLogger(__name__)
@@ -180,13 +181,33 @@ class RenderProcess:
     run at a time (idle screen XOR active stream) -- enforced by main.py's
     FSM, not by this class, so this class stays a dumb process wrapper."""
 
+    # gst-launch -v prints this once the first decoded frame's caps reach
+    # kmssink's sink pad. v4l2h264dec's src caps are dynamic (only fixed
+    # after a frame is actually decoded), so this line appearing is a
+    # reliable "first frame made it to the display" signal; its ABSENCE a
+    # few seconds in is the intermittent cold-start freeze (screen stuck on
+    # idle). Matched loosely so a minor -v format change doesn't break it.
+    _FIRST_FRAME_MARKERS = ("kmssink", "GstPad:sink:", "caps = video/x-raw")
+    # A working start reaches the sink well under a second (measured ~0.2s);
+    # 6s is comfortably past that, so a miss here is a real freeze, not a
+    # slow-but-fine startup.
+    FIRST_FRAME_TIMEOUT_S = 6.0
+
     def __init__(self) -> None:
         self._proc: subprocess.Popen | None = None
         self._reader: threading.Thread | None = None
+        self._monitor: threading.Thread | None = None
+        self._first_frame = threading.Event()
 
     @property
     def is_running(self) -> bool:
         return self._proc is not None and self._proc.poll() is None
+
+    @property
+    def first_frame_seen(self) -> bool:
+        """True once a decoded frame has reached kmssink for the current
+        pipeline. Stays False on the cold-start freeze."""
+        return self._first_frame.is_set()
 
     def start(self, pipeline_description: str) -> None:
         if self.is_running:
@@ -220,22 +241,50 @@ class RenderProcess:
             bufsize=1,
             env=env,
         )
-        self._reader = threading.Thread(target=self._drain_output, args=(self._proc,), daemon=True)
+        self._first_frame.clear()
+        self._reader = threading.Thread(
+            target=self._drain_output, args=(self._proc, time.monotonic()), daemon=True
+        )
         self._reader.start()
+        self._monitor = threading.Thread(target=self._watch_first_frame, args=(self._proc,), daemon=True)
+        self._monitor.start()
 
-    def _drain_output(self, proc: subprocess.Popen) -> None:
-        """Drain the child's -v output line by line so its pipe never fills.
-        For now every line is logged (to capture the exact 'first frame
-        decoded' caps marker on real hardware); marker detection for
-        cold-start-freeze auto-recovery will hook in here next."""
+    def _drain_output(self, proc: subprocess.Popen, started_at: float) -> None:
+        """Drain the child's -v output line by line (an unread pipe that
+        fills would stall/zombie the child), watching for the first-frame
+        marker. Only the marker, warnings, and errors are logged -- the rest
+        of -v is dropped so this stays quiet enough to leave on in
+        production and during soak runs."""
         stream = proc.stdout
         if stream is None:
             return
         try:
             for line in stream:
-                logger.info("gstout: %s", line.rstrip())
+                if not self._first_frame.is_set() and all(m in line for m in self._FIRST_FRAME_MARKERS):
+                    self._first_frame.set()
+                    logger.info(
+                        "render: first video frame reached kmssink %.2fs after start",
+                        time.monotonic() - started_at,
+                    )
+                elif "ERROR" in line or "WARN" in line:
+                    logger.warning("render: %s", line.rstrip())
         except (ValueError, OSError):
             pass  # pipe closed on stop()
+
+    def _watch_first_frame(self, proc: subprocess.Popen) -> None:
+        """Flag the intermittent cold-start freeze: if no decoded frame
+        reaches kmssink within the timeout while the pipeline is still up,
+        the screen is stuck on idle and (today) needs a reconnect to
+        re-roll. Observability only -- no auto-recovery yet; this makes the
+        freeze countable in the journal during stress/soak runs."""
+        if self._first_frame.wait(timeout=self.FIRST_FRAME_TIMEOUT_S):
+            return
+        if proc.poll() is None and self._proc is proc:
+            logger.warning(
+                "render: NO video frame reached kmssink within %.0fs of start -- "
+                "cold-start freeze (screen stuck on idle); a reconnect re-rolls it",
+                self.FIRST_FRAME_TIMEOUT_S,
+            )
 
     def stop(self, *, timeout: float = 3.0) -> None:
         if self._proc is None:
@@ -249,3 +298,5 @@ class RenderProcess:
             self._proc.wait(timeout=timeout)
         self._proc = None
         self._reader = None
+        self._monitor = None
+        self._first_frame.clear()

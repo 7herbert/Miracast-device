@@ -83,3 +83,37 @@ def test_trace_flag_off_by_default(fake_popen, monkeypatch):
     monkeypatch.delenv("CASTD_TRACE_RENDER_LATENCY", raising=False)
     RenderProcess().start("videotestsrc ! fakesink")
     assert fake_popen[0].env is None
+
+
+class _FakeProc:
+    def __init__(self, lines):
+        self.stdout = iter(lines)
+
+    def poll(self):
+        return None
+
+
+# Real -v lines captured on the Pi 4 (2026-07-22).
+_KMS_SINK_CAPS = (
+    "/GstPipeline:pipeline0/GstKMSSink:kmssink0.GstPad:sink: caps = "
+    "video/x-raw(memory:DMABuf), format=(string)DMA_DRM, width=(int)1920, height=(int)1080\n"
+)
+_DECODER_INPUT_CAPS = (
+    "/GstPipeline:pipeline0/v4l2h264dec:v4l2h264dec0.GstPad:sink: caps = "
+    "video/x-h264, stream-format=(string)byte-stream, width=(int)1920, height=(int)1080\n"
+)
+
+
+def test_drain_output_detects_first_frame_when_kms_gets_raw_caps():
+    rp = RenderProcess()
+    rp._drain_output(_FakeProc([_DECODER_INPUT_CAPS, _KMS_SINK_CAPS]), 0.0)
+    assert rp.first_frame_seen
+
+
+def test_drain_output_does_not_false_trigger_on_decoder_input_caps():
+    # The decoder's SINK pad negotiates video/x-h264 BEFORE any frame is
+    # decoded -- it must not be mistaken for a first frame, or the freeze
+    # detector would think a frozen session is fine.
+    rp = RenderProcess()
+    rp._drain_output(_FakeProc([_DECODER_INPUT_CAPS, "Setting pipeline to PLAYING ...\n"]), 0.0)
+    assert not rp.first_frame_seen
