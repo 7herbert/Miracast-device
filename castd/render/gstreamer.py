@@ -147,6 +147,20 @@ def build_wfd_pipeline_description(*, udp_port: int, target: RenderTarget) -> st
         f"demux. ! queue ! h264parse "
         f"! capssetter join=true replace=false caps=video/x-h264,profile=(string)high "
         f"! v4l2h264dec "
+        # RAW-domain leaky queue between decoder and sink (2026-07-22). The
+        # residual lag is a startup-transient BACKLOG, not a fixed element
+        # delay: it varies run to run (mostly ~4-5s, once <1s) and is video-
+        # only (audio, on the other tsdemux branch, is instant), so it builds
+        # in the video path while the decoder cold-starts, then never drains
+        # because the hardware decoder runs at ~realtime. Dropping OLD
+        # DECODED frames is safe (unlike dropping compressed data, which can
+        # lose SPS/PPS -- the trap that sank the reverted compressed-domain
+        # leaky experiment). leaky=downstream drops the oldest queued frame
+        # when the decoder bursts ahead of the sink, pinning glass-to-glass
+        # to a couple of frames. Steady state (decode<=30fps, kmssink
+        # sync=false drains instantly) keeps this near-empty, so it is a
+        # no-op except during the catch-up that removes the backlog.
+        f"! queue leaky=downstream max-size-buffers=2 max-size-bytes=0 max-size-time=0 "
         f"! kmssink driver-name={target.driver_name}{connector} sync=false "
         f"demux. ! queue leaky=downstream ! aacparse ! avdec_aac ! audioconvert ! audioresample "
         f"! alsasink sync=false"

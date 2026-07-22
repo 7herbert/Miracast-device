@@ -31,19 +31,28 @@ def test_wfd_pipeline_uses_pi4_hardware_decode_and_kms():
     assert "kmssink driver-name=vc4" in desc
 
 
-def test_wfd_pipeline_feeds_decoder_straight_to_kms_without_convert():
-    # Real-hardware A/B (2026-07-22): the hardware ISP convert (v4l2convert)
-    # was the ENTIRE source of a fixed ~5s video-only lag -- removing it
-    # dropped glass-to-glass from ~5s to <1s. We advertise 1080p30 native so
-    # the source == the display and no scaling is needed, so the decoder
-    # feeds kmssink directly.
+def test_wfd_pipeline_feeds_decoder_to_kms_without_convert():
+    # Real-hardware A/B (2026-07-22): removing the hardware ISP convert
+    # (v4l2convert) fixed the first-connection freeze and is safe because we
+    # advertise 1080p30 native (source == display, no scaling needed). The
+    # decoder reaches kmssink through only a raw-domain leaky queue.
     desc = build_wfd_pipeline_description(udp_port=1028, target=RenderTarget())
-    assert "v4l2h264dec ! kmssink driver-name=vc4" in desc
     assert "v4l2convert" not in desc
-    # And NO forced width/height caps on the video branch: the decoder emits
+    assert "kmssink driver-name=vc4" in desc
+    # NO forced width/height caps on the video branch: the decoder emits
     # 1920x1088 (16-px aligned) and pinning 1080 is what made the historic
     # direct-connect fail to negotiate.
     assert "video/x-raw,width=" not in desc.split("aacparse")[0]
+
+
+def test_wfd_pipeline_drops_stale_decoded_frames_to_bound_startup_backlog():
+    # Real-hardware (2026-07-22): the residual video-only lag is a startup
+    # backlog (varies run to run, once <1s) that never drains because the hw
+    # decoder runs ~realtime. A raw-domain leaky queue after the decoder
+    # drops OLD DECODED frames (safe -- no SPS/PPS to lose) to catch up to
+    # live. It must sit between the decoder and kmssink, and be leaky.
+    desc = build_wfd_pipeline_description(udp_port=1028, target=RenderTarget())
+    assert "v4l2h264dec ! queue leaky=downstream max-size-buffers=2 max-size-bytes=0 max-size-time=0 ! kmssink" in desc
 
 
 def test_wfd_pipeline_jitter_buffer_never_drops_packets():
