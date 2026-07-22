@@ -185,6 +185,36 @@ the person presenting; both are restored on disconnect. (First-connect-wins
 is also enforced in the FSM/connect path regardless of what a source's UI
 chooses to show.)
 
+### Golden-image deployment (small fleet)
+
+For a handful of rooms, provision one Pi fully, verify it, then clone the SD
+card and change only the per-room config on each copy.
+
+1. **Build the golden unit** per the steps above: dependencies; disable
+   `dnsmasq`/`lightdm`; avahi config; `country=` pin; NetworkManager
+   `unmanaged-devices`; the wpa_supplicant `-i wlan1` drop-in; and — with
+   console access, verifying `iw dev` afterward — the interface-naming udev
+   rule. Enable `castd`.
+2. **Verify on the golden unit** after a fresh reboot: `systemctl is-active
+   castd`; Windows Win+K mirrors at <1s; iPhone AirPlay works; the room name
+   shows on the kiosk. Confirm no leftover test overrides —
+   `ls /etc/systemd/system/castd.service.d/` should be empty (no
+   `CASTD_*` env files from bring-up).
+3. **Clone** the SD card to each room's card.
+4. **Per room**, mount the FAT partition and edit
+   `/boot/firmware/receiver.conf`: set `room_name` and `channel` (stagger
+   36/40/44/48 across nearby rooms to avoid co-channel interference).
+   `wps_pin`/`passphrase` are format-checked, but the live pairing PIN is
+   generated per connection and the group Wi-Fi password is regenerated each
+   boot, so their values here are not what clients actually use.
+5. **Monitor** early on: the intermittent decoder cold-start freeze
+   auto-recovers by re-rolling the render pipeline, but it is logged --
+   `journalctl -u castd | grep -c "render recovered"` (freezes that
+   self-healed) and `... | grep -c "still frozen after"` (gave up after 3
+   re-rolls; should be 0 — if not, a re-roll is likely waiting on the
+   source's next IDR and an RTSP `wfd-idr-request` should be added). Run the
+   72-hour soak (`tools/soak_monitor.sh`) on at least the first unit.
+
 ## Hardware
 
 | Item | Choice |
