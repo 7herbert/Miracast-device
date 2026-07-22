@@ -150,6 +150,19 @@ def test_swconv_variant_keeps_hardware_decode_but_software_converts():
     assert "demux. ! queue ! h264parse" in desc  # queue path untouched
 
 
+def test_nocvt_variant_deletes_v4l2convert_and_forces_no_output_caps():
+    # Prime suspect after the AirPlay reference (2026-07-22): AirPlay is <1s
+    # on the same Pi/kmssink and the one element it does NOT use is
+    # v4l2convert. Source is 1080p30 == display, so no scaling is needed --
+    # delete the convert and go straight to kmssink. No forced width/height
+    # caps, because the decoder emits 1920x1088 (16-px aligned) and pinning
+    # 1080 is what made the historic direct-connect fail to negotiate.
+    desc = build_wfd_pipeline_description(udp_port=1028, target=RenderTarget(), **wfd_variant_params("nocvt"))
+    assert "! v4l2h264dec ! kmssink driver-name=vc4 sync=false" in desc
+    assert "v4l2convert" not in desc
+    assert "video/x-raw,width=1920" not in desc.split("aacparse")[0]  # no forced video caps on the video branch
+
+
 def test_no_idle_pipeline_builder_exists():
     # The idle screen must never be a kmssink pipeline again: it holds DRM
     # master and starves UxPlay's startup-time kmssink (2026-07-15). It is
