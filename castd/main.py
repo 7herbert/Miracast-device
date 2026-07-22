@@ -27,7 +27,6 @@ Still needs real Pi/Windows/iPhone hardware before this is trusted:
 from __future__ import annotations
 
 import logging
-import os
 import sys
 import threading
 import time
@@ -40,7 +39,7 @@ from castd.health import HealthState, serve_forever
 from castd.p2p.dbus_go import GroupInfo, P2PGroupOwner
 from castd.p2p.group_network import SINK_IP, GroupNetwork, find_lease_ip
 from castd.render.framebuffer import paint_framebuffer
-from castd.render.gstreamer import RenderProcess, RenderTarget, build_wfd_pipeline_description, wfd_variant_params
+from castd.render.gstreamer import RenderProcess, RenderTarget, build_wfd_pipeline_description
 from castd.render.idle_screen import render_idle_screen
 from castd import sdnotify
 from castd.stream_watchdog import StreamWatchdog, read_interface_rx_bytes
@@ -406,16 +405,7 @@ class CastDaemon:
                 sock, source_ip=source_ip, capabilities=negotiator.capabilities, negotiator=negotiator, reader=reader
             )
             self.render.stop()
-            self.render.start(
-                build_wfd_pipeline_description(
-                    udp_port=WFD_UDP_PORT,
-                    target=self.render_target,
-                    # CASTD_WFD_VARIANT swaps one video-branch element for
-                    # localizing the fixed ~5s video lag (see gstreamer.py's
-                    # _WFD_VARIANTS). Unset/unknown => production pipeline.
-                    **wfd_variant_params(os.environ.get("CASTD_WFD_VARIANT", "default")),
-                )
-            )
+            self.render.start(build_wfd_pipeline_description(udp_port=WFD_UDP_PORT, target=self.render_target))
             # Only from this point on has the stream watchdog's "is the
             # render process still running" check earned any meaning --
             # see _stream_watch_loop for why this flag exists at all.

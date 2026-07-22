@@ -53,55 +53,46 @@ class RenderTarget:
     height: int = 1080
 
 
-def build_wfd_pipeline_description(
-    *,
-    udp_port: int,
-    target: RenderTarget,
-    video_queue: str = "queue",
-    video_render: str | None = None,
-) -> str:
+def build_wfd_pipeline_description(*, udp_port: int, target: RenderTarget) -> str:
     """gst-launch-1.0 style pipeline string for a Miracast/WFD MPEG-TS/H.264
     stream arriving over RTP on `udp_port`. v4l2h264dec uses the Pi 4's
     hardware decoder; kmssink writes straight to the DRM plane.
 
-    video_queue and video_render (the whole decode->convert->sink segment
-    that comes after h264parse/capssetter) default to the production
-    elements; they are overridden only by the diagnostic variants in
-    wfd_variant_params (see there) while localizing the video-branch-only
-    ~5s lag (2026-07-22).
+    Lessons this string encodes from real hardware:
+      * clock-rate=90000 is mandatory in the udpsrc caps (2026-07-14) -- RTP
+        caps must be fully fixed before preroll, omitting it died with
+        "Filter caps do not completely specify the output format". 90000 Hz
+        is the fixed RTP clock for MPEG-TS (RFC 3551, payload 33).
+      * capssetter rewriting profile to "high" (2026-07-14) -- the Windows 11
+        source streams H.264 constrained-high (captured caps: profile=
+        (string)constrained-high, level=4.2), but the bcm2835 V4L2 decoder's
+        profile menu only lists baseline/constrained-baseline/main/high, so
+        GStreamer's caps intersection with the parsed stream is EMPTY and the
+        decoder sink refuses the caps. Constrained-high is a strict subset of
+        high, so decoding it as high is lossless; capssetter (accept-anything
+        sink template) breaks the doomed intersection and hands the decoder a
+        profile string its driver does list.
+      * NO v4l2convert -- decoder straight to kmssink (2026-07-22). The
+        hardware ISP convert was the ENTIRE source of a fixed ~5s video-only
+        lag: deleting it dropped glass-to-glass from ~5s to <1s, proven by
+        on-hardware A/B and corroborated by the AirPlay reference (iPhone
+        mirroring on this same Pi/kmssink is <1s and uxplay's pipeline
+        likewise uses no v4l2convert). The convert had only ever been a
+        bridge/scaler, but we advertise 1080p30 as native (see rtsp.py) so
+        the source sends 1080p == the 1920x1080 display and nothing needs
+        scaling. Crucially there are also NO forced width/height caps between
+        decoder and sink: the decoder emits 1920x1088 (16-px macroblock
+        aligned) and pinning 1080 there is exactly what made the historic
+        direct-connect fail to negotiate ("not-negotiated (-4)"); without the
+        pin, kmssink takes the decoder's native buffers on an NV12-capable
+        DRM plane. If a future source ever negotiates a non-1080p mode,
+        revisit this: kmssink's own DRM-plane scaling must cover it, or a
+        LOW-LATENCY scaler (NOT v4l2convert) has to come back.
 
-    Two lessons this string encodes from real hardware (2026-07-14):
-      * clock-rate=90000 is mandatory in the udpsrc caps -- RTP caps must
-        be fully fixed before preroll, omitting it died with "Filter caps
-        do not completely specify the output format". 90000 Hz is the
-        fixed RTP clock for MPEG-TS (RFC 3551, payload 33).
-      * v4l2convert between the decoder and kmssink -- with RTP actually
-        flowing, direct v4l2h264dec ! kmssink died with "streaming
-        stopped, reason not-negotiated (-4)": the decoder outputs YUV and
-        the DRM plane kmssink picks need not accept it. v4l2convert is the
-        Pi's hardware ISP path (zero CPU), the canonical Pi 4 bridge for
-        exactly this pairing.
-      * capssetter rewriting profile to "high" -- the Windows 11 source
-        streams H.264 constrained-high (captured caps: profile=(string)
-        constrained-high, level=4.2), but the bcm2835 V4L2 decoder's
-        profile menu only lists baseline/constrained-baseline/main/high,
-        so GStreamer's caps intersection with the parsed stream is EMPTY
-        and the decoder sink refuses the caps -- the second face of the
-        same not-negotiated error. Constrained-high is a strict subset
-        of high, so decoding it as high is lossless and safe; capssetter
-        (accept-anything sink template) breaks the doomed intersection
-        and hands the decoder a profile string its driver does list."""
+    (History: a CASTD_WFD_VARIANT env hook with qcap/swdec/swconv/nocvt
+    variants localized the lag to v4l2convert by A/B on hardware, then was
+    removed once nocvt became this default -- see git around 2026-07-22.)"""
     connector = f" connector-id={target.connector_id}" if target.connector_id is not None else ""
-    if video_render is None:
-        # Production video path: Pi 4 hardware H.264 decode -> hardware ISP
-        # convert/scale to the display size -> DRM plane. See the docstring
-        # for why each element is here (clock-rate, v4l2convert bridge,
-        # pixel-aspect pinning).
-        video_render = (
-            f"v4l2h264dec ! v4l2convert "
-            f"! video/x-raw,width={target.width},height={target.height},pixel-aspect-ratio=1/1 "
-            f"! kmssink driver-name={target.driver_name}{connector} sync=false"
-        )
     # latency=100, NO drop-on-latency: the drop-on-latency=true latency=50
     # combination (tried for cursor lag) shredded the H.264 stream --
     # every dropped TS packet corrupts the frame chain until the next
@@ -153,68 +144,13 @@ def build_wfd_pipeline_description(
         # glass-to-glass lag measured against real Windows mirroring
         # (2026-07-15).
         f"! tsdemux name=demux latency=50 "
-        f"demux. ! {video_queue} ! h264parse "
+        f"demux. ! queue ! h264parse "
         f"! capssetter join=true replace=false caps=video/x-h264,profile=(string)high "
-        f"! {video_render} "
+        f"! v4l2h264dec "
+        f"! kmssink driver-name={target.driver_name}{connector} sync=false "
         f"demux. ! queue leaky=downstream ! aacparse ! avdec_aac ! audioconvert ! audioresample "
         f"! alsasink sync=false"
     )
-
-
-# Diagnostic pipeline variants, selected by the CASTD_WFD_VARIANT env var
-# (mapped in main.py). The 2026-07-22 latency picture: audio is instant
-# while video lags a FIXED ~5s from the first frame, so the delay is not in
-# the shared upstream (jitterbuffer/tsdemux -- those would delay audio too)
-# but in one video-branch element after the tsdemux split. The GStreamer
-# latency tracer can't measure it here (its per-buffer instrumentation
-# starves this Pi's realtime decode path and freezes every session at frame
-# one -- confirmed twice), so instead each variant swaps exactly ONE
-# suspect element and a glass-to-glass A/B says which one holds the 5s.
-# All variants are non-destructive and revert to production by unsetting
-# the env var; the winning finding gets baked in as the default afterwards.
-#
-# Results so far (2026-07-22):
-#   qcap   -> 5s UNCHANGED: the queue was never accumulating; ruled out.
-#   swdec  -> never flowed (black/frozen): full software decode is too heavy
-#             for 1080p30 on a Pi 4; no latency verdict.
-#   swconv -> 8-20s and GROWING: software convert is also too heavy at
-#             1080p30, so it added its own accumulation; no clean verdict.
-#   AirPlay reference: iPhone mirroring on this SAME Pi/kmssink/screen is
-#             <1s, so the decode->display hardware is NOT inherently slow --
-#             the 5s is specific to this pipeline. The one element AirPlay's
-#             (uxplay) pipeline does NOT use is v4l2convert (it uses software
-#             videoconvert). That points hard at v4l2convert, and since the
-#             source is 1080p30 == the display, no scaling is even needed --
-#             so nocvt just deletes it.
-_WFD_VARIANTS: dict[str, dict[str, str]] = {
-    # Production. Plain unbounded queue + Pi 4 hardware decode + ISP convert.
-    "default": {},
-    # Bound the compressed video queue. Non-leaky: it only ever BLOCKS,
-    # never drops, so it cannot lose an SPS/PPS buffer the way the reverted
-    # leaky experiment could. RESULT: 5s unchanged -> queue ruled out.
-    "qcap": {"video_queue": "queue max-size-buffers=8 max-size-bytes=0 max-size-time=0"},
-    # Full software decode+convert. RESULT: too heavy to flow at 1080p30.
-    "swdec": {"video_render": "avdec_h264 ! videoconvert ! videoscale ! video/x-raw,width=1920,height=1080,pixel-aspect-ratio=1/1 ! kmssink driver-name=vc4 sync=false"},
-    # Hardware decode, software convert. RESULT: 8-20s growing (sw convert
-    # too heavy at 1080p30) -> no clean verdict.
-    "swconv": {"video_render": "v4l2h264dec ! videoconvert ! videoscale ! video/x-raw,width=1920,height=1080,pixel-aspect-ratio=1/1 ! kmssink driver-name=vc4 sync=false"},
-    # Prime suspect after the AirPlay reference: DELETE v4l2convert and feed
-    # the hardware decoder straight to kmssink. The source is 1080p30 == the
-    # display so no scaling is needed; no forced width/height caps either,
-    # because the decoder emits 1920x1088 (16-px aligned) and pinning 1080
-    # here is exactly what made the historic direct-connect fail to
-    # negotiate. If this flows AND is low-latency, v4l2convert was the 5s
-    # and this IS the fix; if it won't negotiate, a convert is mandatory and
-    # we chase a faster one (GL) next.
-    "nocvt": {"video_render": "v4l2h264dec ! kmssink driver-name=vc4 sync=false"},
-}
-
-
-def wfd_variant_params(name: str) -> dict[str, str]:
-    """Map a CASTD_WFD_VARIANT name to build_wfd_pipeline_description kwargs.
-    Unknown names fall back to production so a typo in an env override can
-    never wedge the receiver -- it just streams normally."""
-    return _WFD_VARIANTS.get(name, {})
 
 
 # NOTE: the idle screen deliberately does NOT go through this module any

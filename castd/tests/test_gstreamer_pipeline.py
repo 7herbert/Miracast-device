@@ -1,7 +1,7 @@
 """Tests for the pure pipeline-string builders in castd.render.gstreamer.
 No GStreamer required -- these lock in wire-format details that real
 hardware proved fatal when wrong."""
-from castd.render.gstreamer import RenderTarget, build_wfd_pipeline_description, wfd_variant_params
+from castd.render.gstreamer import RenderTarget, build_wfd_pipeline_description
 
 
 def test_wfd_pipeline_rtp_caps_are_fully_fixed():
@@ -31,17 +31,19 @@ def test_wfd_pipeline_uses_pi4_hardware_decode_and_kms():
     assert "kmssink driver-name=vc4" in desc
 
 
-def test_wfd_pipeline_bridges_decoder_to_kms_via_hardware_convert():
-    # Real-hardware failure (2026-07-14): with RTP flowing, direct
-    # v4l2h264dec ! kmssink died "not-negotiated (-4)" -- the DRM plane
-    # kmssink picks need not accept the decoder's YUV output. v4l2convert
-    # is the Pi's zero-CPU ISP bridge between them, and scaling to the
-    # display size there means any source resolution fills the screen.
+def test_wfd_pipeline_feeds_decoder_straight_to_kms_without_convert():
+    # Real-hardware A/B (2026-07-22): the hardware ISP convert (v4l2convert)
+    # was the ENTIRE source of a fixed ~5s video-only lag -- removing it
+    # dropped glass-to-glass from ~5s to <1s. We advertise 1080p30 native so
+    # the source == the display and no scaling is needed, so the decoder
+    # feeds kmssink directly.
     desc = build_wfd_pipeline_description(udp_port=1028, target=RenderTarget())
-    # pixel-aspect-ratio pinned to 1/1: without it a non-16:9 source mode
-    # gets aspect-compensated during scaling and crops at the display
-    # edges instead of stretching uniformly.
-    assert "v4l2h264dec ! v4l2convert ! video/x-raw,width=1920,height=1080,pixel-aspect-ratio=1/1 ! kmssink" in desc
+    assert "v4l2h264dec ! kmssink driver-name=vc4" in desc
+    assert "v4l2convert" not in desc
+    # And NO forced width/height caps on the video branch: the decoder emits
+    # 1920x1088 (16-px aligned) and pinning 1080 is what made the historic
+    # direct-connect fail to negotiate.
+    assert "video/x-raw,width=" not in desc.split("aacparse")[0]
 
 
 def test_wfd_pipeline_jitter_buffer_never_drops_packets():
@@ -105,62 +107,6 @@ def test_wfd_pipeline_audio_branch_cannot_backpressure_video():
     desc = build_wfd_pipeline_description(udp_port=1028, target=RenderTarget())
     assert "queue leaky=downstream ! aacparse" in desc
     assert "audioconvert ! audioresample ! alsasink sync=false" in desc
-
-
-def test_default_variant_is_production_pipeline():
-    # An unset/unknown CASTD_WFD_VARIANT must never change the shipped
-    # pipeline -- a typo in an env override cannot be allowed to wedge the
-    # receiver, so it falls back to exactly the production string.
-    prod = build_wfd_pipeline_description(udp_port=1028, target=RenderTarget())
-    assert wfd_variant_params("default") == {}
-    assert wfd_variant_params("nonsense-typo") == {}
-    assert build_wfd_pipeline_description(udp_port=1028, target=RenderTarget(), **wfd_variant_params("default")) == prod
-
-
-def test_qcap_variant_bounds_the_video_queue_without_leaking():
-    # Diagnostic (2026-07-22): does the plain video queue silently hold the
-    # fixed ~5s? Bound it -- but non-leaky, so it can only block, never drop
-    # an SPS/PPS buffer (the trap the reverted leaky experiment fell into).
-    desc = build_wfd_pipeline_description(udp_port=1028, target=RenderTarget(), **wfd_variant_params("qcap"))
-    assert "demux. ! queue max-size-buffers=8 max-size-bytes=0 max-size-time=0 ! h264parse" in desc
-    # The video branch (between the two demux. tees) must carry no leaky=;
-    # only the audio branch (the last tee) is allowed to be leaky.
-    video_branch = desc.split("demux.")[1]
-    assert "leaky" not in video_branch
-    assert "v4l2h264dec ! v4l2convert" in desc  # decoder path untouched by this variant
-
-
-def test_swdec_variant_swaps_hardware_decode_for_software():
-    # Diagnostic (2026-07-22): if the fixed ~5s survives software decode,
-    # the V4L2 hardware decoder/convert was not the element holding it.
-    desc = build_wfd_pipeline_description(udp_port=1028, target=RenderTarget(), **wfd_variant_params("swdec"))
-    assert "avdec_h264 ! videoconvert ! videoscale" in desc
-    assert "v4l2h264dec" not in desc
-    assert "demux. ! queue ! h264parse" in desc  # queue path untouched by this variant
-
-
-def test_swconv_variant_keeps_hardware_decode_but_software_converts():
-    # Diagnostic (2026-07-22): qcap cleared the queue and full swdec was too
-    # heavy to flow, so isolate the last two suspects -- keep hardware
-    # v4l2h264dec, move only the format-convert to software. If the fixed
-    # ~5s vanishes, v4l2convert held it; if it survives, the decoder does.
-    desc = build_wfd_pipeline_description(udp_port=1028, target=RenderTarget(), **wfd_variant_params("swconv"))
-    assert "v4l2h264dec ! videoconvert ! videoscale" in desc
-    assert "v4l2convert" not in desc
-    assert "demux. ! queue ! h264parse" in desc  # queue path untouched
-
-
-def test_nocvt_variant_deletes_v4l2convert_and_forces_no_output_caps():
-    # Prime suspect after the AirPlay reference (2026-07-22): AirPlay is <1s
-    # on the same Pi/kmssink and the one element it does NOT use is
-    # v4l2convert. Source is 1080p30 == display, so no scaling is needed --
-    # delete the convert and go straight to kmssink. No forced width/height
-    # caps, because the decoder emits 1920x1088 (16-px aligned) and pinning
-    # 1080 is what made the historic direct-connect fail to negotiate.
-    desc = build_wfd_pipeline_description(udp_port=1028, target=RenderTarget(), **wfd_variant_params("nocvt"))
-    assert "! v4l2h264dec ! kmssink driver-name=vc4 sync=false" in desc
-    assert "v4l2convert" not in desc
-    assert "video/x-raw,width=1920" not in desc.split("aacparse")[0]  # no forced video caps on the video branch
 
 
 def test_no_idle_pipeline_builder_exists():
